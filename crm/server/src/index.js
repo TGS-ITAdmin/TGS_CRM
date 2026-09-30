@@ -3,6 +3,10 @@ require('dotenv').config({ path: require('path').resolve(__dirname, '../../.env'
 const path = require('path')
 const fs = require('fs')
 const express = require('express')
+// Must load before any router is created. Express 4 does not catch errors
+// thrown inside async handlers; without this, one bad request (an invalid id,
+// a duplicate key, a dropped DB connection) crashes the whole process.
+require('express-async-errors')
 const cors = require('cors')
 
 const { connect } = require('./db')
@@ -64,10 +68,38 @@ if (fs.existsSync(clientDist)) {
   )
 }
 
+/* Central error handler. With express-async-errors in place, every error
+   thrown in a route lands here instead of killing the process. */
 app.use((err, req, res, next) => {
-  console.error('[error]', err.message)
-  const status = err.status || 500
+  if (res.headersSent) return next(err)
+
+  // Malformed ObjectId in a URL or query, e.g. /api/contacts/not-an-id
+  if (err.name === 'CastError') {
+    return res.status(400).json({ error: 'Invalid id or value in the request' })
+  }
+  // Mongoose schema validation (required fields, enums, min/max)
+  if (err.name === 'ValidationError') {
+    return res.status(400).json({ error: err.message })
+  }
+  // Unique index collision, e.g. two contacts with the same email
+  if (err.code === 11000) {
+    return res.status(409).json({ error: 'That record already exists' })
+  }
+  // Malformed JSON body
+  if (err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Request body is not valid JSON' })
+  }
+
+  console.error('[error]', req.method, req.originalUrl, err.stack || err.message)
+  const status = err.status || err.statusCode || 500
   res.status(status).json({ error: status === 500 ? 'Something went wrong on the server' : err.message })
+})
+
+/* Safety net for errors outside a request (scheduler internals, stray
+   promises). Log instead of crashing: an in-flight failure should not take
+   every user offline. */
+process.on('unhandledRejection', (err) => {
+  console.error('[unhandledRejection]', err && err.stack ? err.stack : err)
 })
 
 /* Checked before the database is touched, so a misconfigured deploy fails
