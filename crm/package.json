@@ -1,0 +1,23 @@
+{
+  "name": "tgs-outreach-crm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Multi-channel outreach CRM for LinkedIn, email and cold calling",
+  "scripts": {
+    "install:all": "npm install && npm --prefix server install && npm --prefix client install",
+    "dev": "concurrently -n server,client -c cyan,magenta \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "PORT=3002 npm --prefix server run dev",
+    "dev:client": "npm --prefix client run dev",
+    "build": "npm --prefix client run build",
+    "build:all": "npm --prefix server install --omit=dev && npm --prefix client install --include=dev && npm --prefix client run build",
+    "start": "npm --prefix server start",
+    "test": "npm --prefix server test",
+    "migrate": "node server/scripts/migrate-to-companies.js"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
