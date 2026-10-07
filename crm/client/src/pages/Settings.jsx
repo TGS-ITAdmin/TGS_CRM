@@ -649,7 +649,7 @@ function Users() {
   useEffect(() => { load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
   if (!data) return <Loading />
 
-  const { users, roles, permissions, grantable } = data
+  const { users, roles, permissions, grantable, campaigns = [], grantableCampaigns = null } = data
   const roleLabel = (value) => roles.find((r) => r.value === value)?.label || value
   const activeAdmins = users.filter((u) => u.role === 'admin' && u.active).length
 
@@ -765,6 +765,7 @@ function Users() {
       {(adding || editing) && (
         <UserModal
           user={editing} roles={roles} permissions={permissions} grantable={grantable} me={me}
+          campaigns={campaigns} grantableCampaigns={grantableCampaigns}
           onClose={() => { setAdding(false); setEditing(null) }}
           onSaved={async () => { setAdding(false); setEditing(null); await load(); await reloadBootstrap() }}
         />
@@ -789,7 +790,67 @@ function Users() {
   )
 }
 
-function UserModal({ user, roles, permissions, grantable, me, onClose, onSaved }) {
+/* Sits under the "Add and move contacts in campaigns" right: all campaigns,
+ * or only the ones ticked. A granter who is limited themselves only sees
+ * (and can only hand out) their own campaigns. */
+function CampaignAccess({ campaigns, grantableCampaigns, mode, setMode, allowed, setAllowed, disabled }) {
+  const restrictedGranter = Array.isArray(grantableCampaigns)
+  const visible = restrictedGranter
+    ? campaigns.filter((c) => grantableCampaigns.includes(c.id))
+    : campaigns
+
+  function toggleCampaign(id) {
+    setAllowed((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  return (
+    <div style={{
+      margin: '8px 0 4px 26px', padding: '10px 12px',
+      border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'var(--surface-2)',
+    }}>
+      <div className="small strong" style={{ marginBottom: 6 }}>Which campaigns?</div>
+      <label className="row small" style={{ gap: 8, marginBottom: 4, opacity: restrictedGranter ? 0.5 : 1 }}>
+        <input type="radio" name="campaign-scope" checked={mode === 'all'}
+          disabled={disabled || restrictedGranter} onChange={() => setMode('all')} />
+        All campaigns, including ones created later
+      </label>
+      <label className="row small" style={{ gap: 8 }}>
+        <input type="radio" name="campaign-scope" checked={mode === 'some'}
+          disabled={disabled} onChange={() => setMode('some')} />
+        Only the campaigns ticked below
+      </label>
+      {restrictedGranter && (
+        <div className="small" style={{ color: 'var(--warn)', marginTop: 4 }}>
+          You are limited to specific campaigns yourself, so you can only hand out those.
+        </div>
+      )}
+
+      {mode === 'some' && (
+        visible.length === 0 ? (
+          <div className="small muted" style={{ marginTop: 8 }}>No campaigns exist yet.</div>
+        ) : (
+          <div style={{ marginTop: 8, maxHeight: 200, overflowY: 'auto', paddingLeft: 4 }}>
+            {visible.map((c) => (
+              <label key={c.id} className="row small" style={{ gap: 8, padding: '3px 0', cursor: 'pointer' }}>
+                <input type="checkbox" className="checkbox" checked={allowed.has(c.id)}
+                  disabled={disabled} onChange={() => toggleCampaign(c.id)} />
+                <span>{c.name}</span>
+                {!c.active && <span className="small faint">(paused)</span>}
+              </label>
+            ))}
+          </div>
+        )
+      )}
+    </div>
+  )
+}
+
+function UserModal({ user, roles, permissions, grantable, me, campaigns = [], grantableCampaigns = null, onClose, onSaved }) {
   const toast = useToast()
   const isSelf = user && user.id === me.id
   const [form, setForm] = useState({
@@ -801,6 +862,12 @@ function UserModal({ user, roles, permissions, grantable, me, onClose, onSaved }
   const [overrides, setOverrides] = useState({ ...(user?.permissions || {}) })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  // Campaign limit for 'campaigns.enroll'. An empty stored list means "all".
+  const restrictedGranter = Array.isArray(grantableCampaigns)
+  const [campaignMode, setCampaignMode] = useState(
+    (user?.allowedCampaigns || []).length || restrictedGranter ? 'some' : 'all'
+  )
+  const [allowedCampaigns, setAllowedCampaigns] = useState(new Set(user?.allowedCampaigns || []))
 
   const rolePreset = roles.find((r) => r.value === form.role)
   const grantableSet = new Set(grantable)
@@ -830,7 +897,15 @@ function UserModal({ user, roles, permissions, grantable, me, onClose, onSaved }
     })
   }
 
+  // Only sent when the right is on: there is nothing to limit otherwise.
+  const sendsCampaigns = !isAdminRole && effective('campaigns.enroll')
+  const campaignPayload = campaignMode === 'all' ? [] : [...allowedCampaigns]
+
   async function save() {
+    if (sendsCampaigns && campaignMode === 'some' && allowedCampaigns.size === 0) {
+      setError('Tick at least one campaign, or choose "All campaigns".')
+      return
+    }
     setBusy(true)
     setError('')
     try {
@@ -840,10 +915,15 @@ function UserModal({ user, roles, permissions, grantable, me, onClose, onSaved }
         if (!isSelf) {
           body.role = form.role
           body.permissions = overrides
+          if (sendsCampaigns) body.allowedCampaigns = campaignPayload
         }
         await api.updateUser(user.id, body)
       } else {
-        await api.createUser({ ...form, permissions: overrides })
+        await api.createUser({
+          ...form,
+          permissions: overrides,
+          ...(sendsCampaigns ? { allowedCampaigns: campaignPayload } : {}),
+        })
       }
       toast.success(user ? 'Access updated' : 'User added')
       onSaved()
@@ -975,6 +1055,14 @@ function UserModal({ user, roles, permissions, grantable, me, onClose, onSaved }
                             )}
                           </div>
                         </label>
+                        {item.key === 'campaigns.enroll' && on && (
+                          <CampaignAccess
+                            campaigns={campaigns} grantableCampaigns={grantableCampaigns}
+                            mode={campaignMode} setMode={setCampaignMode}
+                            allowed={allowedCampaigns} setAllowed={setAllowedCampaigns}
+                            disabled={!canGrant}
+                          />
+                        )}
                       </div>
                     )
                   })}

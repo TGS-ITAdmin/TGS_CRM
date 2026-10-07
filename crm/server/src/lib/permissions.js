@@ -17,7 +17,7 @@ const PERMISSIONS = [
     items: [
       { key: 'contacts.viewAll', label: 'See everyone\'s contacts', description: 'Without this, a person only sees contacts assigned to them.' },
       { key: 'contacts.edit', label: 'Create and edit contacts', description: 'Add contacts and companies, and change their details.' },
-      { key: 'contacts.import', label: 'Import from CSV', description: 'Bulk-load contact lists.' },
+      { key: 'contacts.import', label: 'Import from CSV or Excel', description: 'Bulk-load contact lists.' },
       { key: 'contacts.export', label: 'Export to CSV', description: 'Download contact data. Worth withholding from people who should not be able to walk out with the list.' },
       { key: 'contacts.delete', label: 'Delete contacts and companies', description: 'Permanent, including their whole timeline.' },
       { key: 'records.merge', label: 'Merge duplicates', description: 'Combine two records into one. Cannot be undone.' },
@@ -37,6 +37,7 @@ const PERMISSIONS = [
     group: 'Outreach',
     items: [
       { key: 'campaigns.manage', label: 'Build campaigns', description: 'Create and edit campaigns, stages and message templates.' },
+      { key: 'campaigns.enroll', label: 'Add and move contacts in campaigns', description: 'Put contacts into a campaign or move them from one campaign to another. Can be limited to specific campaigns below.' },
       { key: 'suppression.manage', label: 'Manage the do-not-contact list', description: 'Add and remove suppression entries.' },
     ],
   },
@@ -65,13 +66,13 @@ const ROLE_PRESETS = {
       'contacts.viewAll', 'contacts.edit', 'contacts.import', 'contacts.export',
       'contacts.delete', 'records.merge',
       'deals.viewAll', 'deals.editAny', 'quotes.approve',
-      'campaigns.manage', 'suppression.manage', 'reports.viewTeam',
+      'campaigns.manage', 'campaigns.enroll', 'suppression.manage', 'reports.viewTeam',
     ],
   },
   rep: {
     label: 'Rep',
     description: 'Works their own book. Sees the shared pipeline but edits only their own deals.',
-    permissions: ['contacts.edit', 'deals.viewAll'],
+    permissions: ['contacts.edit', 'deals.viewAll', 'campaigns.enroll'],
   },
   viewer: {
     label: 'Read-only',
@@ -157,6 +158,31 @@ function ungrantable(granter, role, overrides) {
   return [...wanted].filter((key) => !can(granter, key))
 }
 
+/* Campaign scope for 'campaigns.enroll'. An empty list means every campaign;
+ * a non-empty one limits the person to exactly those. Admins are never
+ * limited, for the same reason they hold every right. */
+function campaignScope(user) {
+  if (!user || user.role === 'admin') return null
+  const list = (user.allowedCampaigns || []).map(String)
+  return list.length ? list : null
+}
+
+function canUseCampaign(user, campaignId) {
+  if (!can(user, 'campaigns.enroll')) return false
+  const scope = campaignScope(user)
+  return !scope || scope.includes(String(campaignId))
+}
+
+/* A person limited to some campaigns cannot hand anyone a wider list —
+ * the same no-escalation rule as the rights themselves. Returns the ids
+ * the granter may not give out (an empty target list means "all"). */
+function ungrantableCampaigns(granter, wanted) {
+  const scope = campaignScope(granter)
+  if (!scope) return []
+  if (!wanted.length) return ['all']
+  return wanted.filter((id) => !scope.includes(String(id)))
+}
+
 function describe(key) {
   return PERMISSION_INDEX.get(key) || { key, label: key, description: '' }
 }
@@ -165,4 +191,5 @@ module.exports = {
   PERMISSIONS, ALL_KEYS, ROLES, ROLE_PRESETS,
   can, effectivePermissions, permissionMap,
   roleDefaults, sanitizeOverrides, ungrantable, describe,
+  campaignScope, canUseCampaign, ungrantableCampaigns,
 }

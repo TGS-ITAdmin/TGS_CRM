@@ -28,6 +28,7 @@
   --call-soft: #e2f5ee;
 
   --danger: #dc2626;
+  --danger-hover: #b91c1c;
   --danger-soft: #fdeaea;
   --warn: #d97706;
   --warn-soft: #fdf1de;
@@ -185,7 +186,9 @@ a:hover { text-decoration: underline; }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
 .btn-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
-.btn-danger:hover:not(:disabled) { filter: brightness(.92); }
+/* The generic .btn:hover sets a light background; without an explicit one
+   here, a danger button turned light grey with white text on hover. */
+.btn-danger:hover:not(:disabled) { background: var(--danger-hover); border-color: var(--danger-hover); color: #fff; }
 .btn-ghost { border-color: transparent; background: transparent; color: var(--text-muted); }
 .btn-ghost:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
 .btn-sm { padding: 4px 9px; font-size: 12px; }

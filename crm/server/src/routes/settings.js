@@ -1,12 +1,13 @@
 const express = require('express')
 const bcrypt = require('bcryptjs')
 const {
-  User, Settings, Suppression, Contact, Deal, Quote,
+  User, Settings, Suppression, Contact, Deal, Quote, Campaign,
   DEFAULT_STATUSES, CALL_OUTCOMES, FORECAST_CATEGORIES, PRICING_MODELS, QUOTE_STATUSES,
 } = require('../db')
 const { requireAuth, requirePermission, requireAdmin, can } = require('../middleware/auth')
 const {
   PERMISSIONS, ALL_KEYS, ROLES, ROLE_PRESETS, sanitizeOverrides, ungrantable, describe,
+  campaignScope, ungrantableCampaigns,
 } = require('../lib/permissions')
 const { stageList } = require('../lib/deals')
 const { currencyList } = require('../lib/money')
@@ -307,6 +308,25 @@ router.post('/smtp/test', async (req, res) => {
  * cannot be demoted or deactivated.
  */
 
+/* Normalises a submitted campaign list to ids of campaigns that exist.
+   Returns null when nothing was submitted, so callers can leave it alone. */
+async function cleanCampaignList(submitted) {
+  if (submitted === undefined) return null
+  if (!Array.isArray(submitted)) return []
+  const ids = [...new Set(submitted.map(String))].filter((id) => /^[0-9a-f]{24}$/i.test(id))
+  if (!ids.length) return []
+  const found = await Campaign.find({ _id: { $in: ids } }).select('_id').lean()
+  return found.map((c) => String(c._id))
+}
+
+function campaignGrantError(req, wanted) {
+  const tooWide = ungrantableCampaigns(req.user, wanted)
+  if (!tooWide.length) return null
+  return tooWide[0] === 'all'
+    ? 'You are limited to specific campaigns yourself, so you cannot give someone access to all of them. Pick campaigns from your own list.'
+    : 'You cannot give someone access to a campaign you cannot use yourself.'
+}
+
 async function activeAdminCount(excludeId = null) {
   const filter = { role: 'admin', active: true }
   if (excludeId) filter._id = { $ne: excludeId }
@@ -328,11 +348,16 @@ router.get('/users', requirePermission('users.manage'), async (req, res) => {
     })),
     // What the person looking at this screen may hand out.
     grantable: ALL_KEYS.filter((key) => can(req.user, key)),
+    // Every campaign, for the "limit to these campaigns" picker, plus the
+    // granter's own limit (null = unrestricted).
+    campaigns: (await Campaign.find().select('name active').sort({ name: 1 }).lean())
+      .map((c) => ({ id: String(c._id), name: c.name, active: c.active })),
+    grantableCampaigns: campaignScope(req.user),
   })
 })
 
 router.post('/users', requirePermission('users.manage'), async (req, res) => {
-  const { name, email, password, role, timezone, permissions } = req.body || {}
+  const { name, email, password, role, timezone, permissions, allowedCampaigns } = req.body || {}
   if (!name || !email || !password) {
     return res.status(400).json({ error: 'Name, email and password are required' })
   }
@@ -355,7 +380,12 @@ router.post('/users', requirePermission('users.manage'), async (req, res) => {
     })
   }
 
+  const campaignList = (await cleanCampaignList(allowedCampaigns)) || []
+  const campaignError = campaignGrantError(req, campaignList)
+  if (campaignError) return res.status(403).json({ error: campaignError })
+
   const user = await User.create({
+    allowedCampaigns: campaignList,
     name,
     email: String(email).toLowerCase(),
     passwordHash: await bcrypt.hash(password, 10),
@@ -371,7 +401,7 @@ router.put('/users/:id', requirePermission('users.manage'), async (req, res) => 
   const user = await User.findById(req.params.id)
   if (!user) return res.status(404).json({ error: 'User not found' })
 
-  const { name, role, active, timezone, password, permissions } = req.body || {}
+  const { name, role, active, timezone, password, permissions, allowedCampaigns } = req.body || {}
   const isSelf = user._id.equals(req.user._id)
 
   if (name !== undefined) user.name = name
@@ -379,7 +409,7 @@ router.put('/users/:id', requirePermission('users.manage'), async (req, res) => 
 
   /* Changing your own rights is how a permissions system gets walked around,
      so it is refused outright rather than special-cased. */
-  if ((role !== undefined && role !== user.role) || permissions !== undefined) {
+  if ((role !== undefined && role !== user.role) || permissions !== undefined || allowedCampaigns !== undefined) {
     if (isSelf) {
       return res.status(400).json({
         error: 'You cannot change your own role or permissions. Ask another admin.',
@@ -412,6 +442,13 @@ router.put('/users/:id', requirePermission('users.manage'), async (req, res) => 
     }
     user.permissions = overrides
     user.markModified('permissions')
+  }
+
+  const campaignList = await cleanCampaignList(allowedCampaigns)
+  if (campaignList !== null) {
+    const campaignError = campaignGrantError(req, campaignList)
+    if (campaignError) return res.status(403).json({ error: campaignError })
+    user.allowedCampaigns = campaignList
   }
 
   if (active !== undefined && !active) {

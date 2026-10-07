@@ -5,7 +5,7 @@ import { useAuth } from '../contexts/AuthContext.jsx'
 import { useToast } from '../components/Toast.jsx'
 import CompanyForm from '../components/CompanyForm.jsx'
 import SavedViews from '../components/SavedViews.jsx'
-import { Empty, Loading, Modal, Pager } from '../components/ui.jsx'
+import { Confirm, Empty, Loading, Modal, Pager } from '../components/ui.jsx'
 import { relativeDate, num } from '../components/format.js'
 
 export default function Companies() {
@@ -15,6 +15,23 @@ export default function Companies() {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [creating, setCreating] = useState(false)
+  // Row actions: the company being edited (full record) or deleted (list row).
+  const [editing, setEditing] = useState(null)
+  const [deleting, setDeleting] = useState(null)
+
+  const canEdit = can('contacts.edit')
+  const canDelete = can('contacts.delete')
+  const showActions = canEdit || canDelete
+
+  // The list row is a summary, so the edit form loads the whole record first.
+  async function openEdit(id) {
+    try {
+      const data = await api.getCompany(id)
+      setEditing(data.company)
+    } catch (err) {
+      toast.error(err.message)
+    }
+  }
 
   const query = useMemo(() => ({
     q: params.get('q') || '',
@@ -131,6 +148,7 @@ export default function Companies() {
                     <th>Company</th><th>Industry</th><th className="right">Contacts</th>
                     <th className="right">Seats</th><th>Target roles</th><th>Owner</th>
                     <th>Last activity</th>
+                    {showActions && <th className="right">Actions</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -148,6 +166,24 @@ export default function Companies() {
                       <td className="small truncate" style={{ maxWidth: 200 }}>{c.targetRoles || <span className="faint">—</span>}</td>
                       <td className="small">{c.owner?.name || <span className="faint">—</span>}</td>
                       <td className="small faint nowrap">{relativeDate(c.lastActivityAt)}</td>
+                      {showActions && (
+                        <td className="right nowrap">
+                          <div className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
+                            {canEdit && (
+                              <button className="btn btn-sm" title={`Edit ${c.name}`}
+                                onClick={() => openEdit(c._id)}>
+                                Edit
+                              </button>
+                            )}
+                            {canDelete && (
+                              <button className="btn btn-danger btn-sm" title={`Delete ${c.name}`}
+                                onClick={() => setDeleting(c)}>
+                                Delete
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -175,6 +211,43 @@ export default function Companies() {
             }}
           />
         </Modal>
+      )}
+      {editing && (
+        <Modal title={`Edit ${editing.name}`} width="wide" onClose={() => setEditing(null)}>
+          <CompanyForm
+            initial={editing} submitLabel="Save changes"
+            onCancel={() => setEditing(null)}
+            onSubmit={async (values) => {
+              await api.updateCompany(editing._id, values)
+              toast.success('Company updated')
+              setEditing(null)
+              load()
+            }}
+          />
+        </Modal>
+      )}
+
+      {deleting && (
+        <Confirm
+          danger title="Delete this company" confirmLabel="Delete company"
+          message={
+            deleting.contactCount > 0
+              ? `${deleting.contactCount} contact${deleting.contactCount === 1 ? '' : 's'} belong to ${deleting.name}. They will be detached and kept — only the company record is deleted. This cannot be undone.`
+              : `${deleting.name} will be deleted. This cannot be undone.`
+          }
+          onClose={() => setDeleting(null)}
+          onConfirm={async () => {
+            try {
+              await api.deleteCompany(deleting._id, true)
+              toast.success('Company deleted')
+              setDeleting(null)
+              load()
+            } catch (err) {
+              // e.g. the company still has deals — the server explains why.
+              toast.error(err.message)
+            }
+          }}
+        />
       )}
     </>
   )

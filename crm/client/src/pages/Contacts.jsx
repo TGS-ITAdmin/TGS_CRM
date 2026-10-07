@@ -108,7 +108,7 @@ export default function Contacts() {
           <div className="topbar-sub">{data ? `${num(data.total)} in view` : 'Loading…'}</div>
         </div>
         <div className="spacer" />
-        {can('contacts.import') && <Link className="btn btn-sm" to="/contacts/import">Import CSV</Link>}
+        {can('contacts.import') && <Link className="btn btn-sm" to="/contacts/import">Import contacts</Link>}
         {can('contacts.export') && <button className="btn btn-sm" onClick={exportCsv}>Export</button>}
         {can('contacts.edit') && (
           <button className="btn btn-primary btn-sm" onClick={() => setDialog('new')}>+ New contact</button>
@@ -173,8 +173,12 @@ export default function Contacts() {
           <div className="banner banner-info" style={{ alignItems: 'center' }}>
             <strong>{selected.size} selected</strong>
             <div className="row wrap" style={{ flex: 1 }}>
-              <button className="btn btn-sm" onClick={() => setDialog('enroll')}>Add to campaign</button>
-              <button className="btn btn-sm" onClick={() => setDialog('move')}>Move campaign</button>
+              {can('campaigns.enroll') && (
+                <>
+                  <button className="btn btn-sm" onClick={() => setDialog('enroll')}>Add to campaign</button>
+                  <button className="btn btn-sm" onClick={() => setDialog('move')}>Move campaign</button>
+                </>
+              )}
               <button className="btn btn-sm" onClick={() => setDialog('bulk-status')}>Set status</button>
               {can('contacts.viewAll') && <button className="btn btn-sm" onClick={() => setDialog('bulk-owner')}>Reassign</button>}
               <button className="btn btn-sm" onClick={() => setDialog('tag')}>Tag</button>
@@ -382,7 +386,8 @@ function CampaignPicker({ title, campaigns, note, confirmLabel, danger, onConfir
   const [id, setId] = useState('')
   const [busy, setBusy] = useState(false)
   const toast = useToast()
-  const usable = campaigns.filter((c) => c.stages.length > 0)
+  // Only campaigns that have stages and that this person is allowed to use.
+  const usable = campaigns.filter((c) => (c.stages || []).length > 0 && c.canEnroll !== false)
 
   return (
     <Modal
@@ -404,7 +409,8 @@ function CampaignPicker({ title, campaigns, note, confirmLabel, danger, onConfir
     >
       {usable.length === 0 ? (
         <Empty icon="⚑" title="No usable campaigns">
-          Create a campaign with at least one stage first.
+          There is no active campaign with at least one stage that you are allowed to use.
+          Create one, or ask an admin to give you access under Settings → Users.
         </Empty>
       ) : (
         <>
@@ -414,7 +420,7 @@ function CampaignPicker({ title, campaigns, note, confirmLabel, danger, onConfir
               <option value="">Choose…</option>
               {usable.map((c) => (
                 <option key={c._id} value={c._id}>
-                  {c.name} ({c.stages.length} stage{c.stages.length === 1 ? '' : 's'}, {c.channels.join(' + ')})
+                  {c.name} ({c.stages.length} stage{c.stages.length === 1 ? '' : 's'}{(c.channels || []).length ? `, ${c.channels.join(' + ')}` : ''})
                 </option>
               ))}
             </select>

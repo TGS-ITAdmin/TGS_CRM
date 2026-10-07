@@ -28,7 +28,7 @@ function Row({ label, children }) {
 export default function ContactDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
-  const { statusMap, statuses, isAdmin } = useAuth()
+  const { statusMap, statuses, isAdmin, can } = useAuth()
   const toast = useToast()
 
   const [data, setData] = useState(null)
@@ -101,7 +101,9 @@ export default function ContactDetail() {
           {statuses.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
         </select>
         <button className="btn btn-sm" onClick={() => setDialog('edit')}>Edit</button>
-        <button className="btn btn-primary btn-sm" onClick={() => setDialog('enroll')}>Add to campaign</button>
+        {can('campaigns.enroll') && (
+          <button className="btn btn-primary btn-sm" onClick={() => setDialog('enroll')}>Add to campaign</button>
+        )}
       </div>
 
       <div className="page">
@@ -151,7 +153,7 @@ export default function ContactDetail() {
               <div className="card-body">
                 {enrollments.length === 0 ? (
                   <Empty icon="⚑" title="Not in any campaign"
-                    action={<button className="btn btn-primary btn-sm" onClick={() => setDialog('enroll')}>Add to a campaign</button>}>
+                    action={can('campaigns.enroll') ? <button className="btn btn-primary btn-sm" onClick={() => setDialog('enroll')}>Add to a campaign</button> : null}>
                     Adding this contact to a campaign generates their first task or draft straight away.
                   </Empty>
                 ) : (
@@ -197,7 +199,7 @@ export default function ContactDetail() {
                     </div>
                   ))
                 )}
-                {enrollments.length > 0 && (
+                {enrollments.length > 0 && can('campaigns.enroll') && (
                   <button className="btn btn-sm" style={{ marginTop: 6 }} onClick={() => setDialog('move')}>
                     Move to a different campaign
                   </button>
@@ -460,7 +462,8 @@ function EnrollDialog({ mode, campaigns, contactId, onClose, onDone }) {
   const [id, setId] = useState('')
   const [busy, setBusy] = useState(false)
   const toast = useToast()
-  const usable = campaigns.filter((c) => c.stages.length > 0)
+  // Only campaigns that have stages and that this person is allowed to use.
+  const usable = campaigns.filter((c) => (c.stages || []).length > 0 && c.canEnroll !== false)
 
   async function go() {
     setBusy(true)
@@ -493,7 +496,10 @@ function EnrollDialog({ mode, campaigns, contactId, onClose, onDone }) {
       }
     >
       {usable.length === 0 ? (
-        <Empty icon="⚑" title="No usable campaigns">Create a campaign with at least one stage first.</Empty>
+        <Empty icon="⚑" title="No usable campaigns">
+          There is no active campaign with at least one stage that you are allowed to use.
+          Create one, or ask an admin to give you access under Settings → Users.
+        </Empty>
       ) : (
         <>
           <div className="field">

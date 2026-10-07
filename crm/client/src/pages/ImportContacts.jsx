@@ -92,7 +92,7 @@ export default function ImportContacts() {
         <Link className="btn btn-ghost btn-sm" to="/contacts">←</Link>
         <div>
           <h1>Import contacts</h1>
-          <div className="topbar-sub">CSV upload with column mapping and duplicate detection</div>
+          <div className="topbar-sub">CSV or Excel upload with column mapping and duplicate detection</div>
         </div>
       </div>
 
@@ -159,7 +159,7 @@ export default function ImportContacts() {
                 <Loading label="Reading your file…" />
               ) : (
                 <>
-                  <h2 style={{ marginBottom: 6 }}>Choose a CSV file</h2>
+                  <h2 style={{ marginBottom: 6 }}>Choose a CSV or Excel file</h2>
                   <p className="small muted">
                     Any column layout works — you map the columns on the next screen. Duplicates are matched
                     on email and LinkedIn URL, both inside the file and against contacts you already have.
@@ -174,11 +174,11 @@ export default function ImportContacts() {
                     onClick={() => fileRef.current?.click()}
                   >
                     <div style={{ fontSize: 26, marginBottom: 8 }}>📄</div>
-                    <div className="strong">Drop a CSV here, or click to choose one</div>
-                    <div className="small faint" style={{ marginTop: 4 }}>Up to 25,000 rows per file</div>
+                    <div className="strong">Drop a CSV or Excel (.xlsx) file here, or click to choose one</div>
+                    <div className="small faint" style={{ marginTop: 4 }}>Up to 25,000 rows per file · for Excel, the first sheet with data is used</div>
                   </div>
                   <input
-                    ref={fileRef} type="file" accept=".csv,text/csv" hidden
+                    ref={fileRef} type="file" accept=".csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden
                     onChange={(e) => analyse(e.target.files[0])}
                   />
                 </>

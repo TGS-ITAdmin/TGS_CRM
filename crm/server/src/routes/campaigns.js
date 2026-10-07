@@ -1,11 +1,19 @@
 const express = require('express')
 const { Campaign, Enrollment, Contact, Task, OutboxMessage, CHANNELS } = require('../db')
 const { requireAuth, requirePermission, ownerScope } = require('../middleware/auth')
+const { canUseCampaign } = require('../lib/permissions')
 const { enroll, advance, setStage, exitEnrollment, materializeStage, logActivity } = require('../lib/engine')
 const { renderStage } = require('../lib/merge')
 
 const router = express.Router()
 router.use(requireAuth)
+
+/* `channels` is a schema virtual, and .lean() results do not carry virtuals
+ * unless a plugin adds them — so the list came back without it and the
+ * campaign picker crashed reading channels.join. Computed here instead. */
+function withChannels(c) {
+  return { ...c, channels: [...new Set((c.stages || []).map((s) => s.channel))] }
+}
 
 function sanitizeStages(stages) {
   if (!Array.isArray(stages)) return []
@@ -39,8 +47,10 @@ router.get('/', async (req, res) => {
 
   res.json({
     campaigns: campaigns.map((c) => ({
-      ...c,
+      ...withChannels(c),
       counts: byCampaign.get(String(c._id)) || { active: 0, completed: 0, exited: 0 },
+      // Whether this person may add or move contacts into it.
+      canEnroll: canUseCampaign(req.user, c._id),
     })),
   })
 })
@@ -57,7 +67,7 @@ router.get('/:id', async (req, res) => {
   const stageCounts = {}
   for (const s of perStage) stageCounts[s._id] = s.n
 
-  res.json({ campaign, stageCounts })
+  res.json({ campaign: withChannels(campaign), stageCounts })
 })
 
 router.post('/', requirePermission('campaigns.manage'), async (req, res) => {
@@ -191,7 +201,26 @@ router.get('/:id/board', async (req, res) => {
 /* ---- Enrollment operations ------------------------------------------ */
 
 // Enrol one or many contacts. A contact may hold several active enrollments.
+function campaignDenied(req, res, campaignId) {
+  if (!req.can('campaigns.enroll')) {
+    res.status(403).json({
+      error: 'You do not have permission to add or move contacts in campaigns. An admin can grant it under Settings → Users.',
+      permission: 'campaigns.enroll',
+    })
+    return true
+  }
+  if (!canUseCampaign(req.user, campaignId)) {
+    res.status(403).json({
+      error: 'You are not allowed to add contacts to this campaign. An admin can change which campaigns you can use under Settings → Users.',
+      permission: 'campaigns.enroll',
+    })
+    return true
+  }
+  return false
+}
+
 router.post('/:id/enroll', async (req, res) => {
+  if (campaignDenied(req, res, req.params.id)) return
   const { contactIds } = req.body || {}
   if (!Array.isArray(contactIds) || !contactIds.length) return res.status(400).json({ error: 'No contacts selected' })
   if (contactIds.length > 5000) return res.status(400).json({ error: 'Enrol at most 5,000 contacts at a time' })
@@ -218,6 +247,7 @@ router.post('/move', async (req, res) => {
   const { contactIds, fromCampaign, toCampaign, reason } = req.body || {}
   if (!Array.isArray(contactIds) || !contactIds.length) return res.status(400).json({ error: 'No contacts selected' })
   if (!toCampaign) return res.status(400).json({ error: 'Pick a destination campaign' })
+  if (campaignDenied(req, res, toCampaign)) return
 
   const target = await Campaign.findById(toCampaign)
   if (!target) return res.status(404).json({ error: 'Destination campaign not found' })

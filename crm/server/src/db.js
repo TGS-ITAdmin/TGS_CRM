@@ -67,6 +67,9 @@ const userSchema = new Schema(
        Only entries that differ from the role default are stored, so changing a
        preset later still reaches everyone who was left on it. */
     permissions: { type: Object, default: {} },
+    /* Which campaigns this person may add or move contacts into. Empty means
+       all of them — the default, so nothing changes for existing users. */
+    allowedCampaigns: [{ type: Schema.Types.ObjectId, ref: 'Campaign' }],
     // Per-user timezone. No app-wide default: a distributed team each sets
     // their own, and the call list renders contact-local times against it.
     timezone: { type: String, default: 'Asia/Manila' },
@@ -104,6 +107,7 @@ userSchema.methods.toSafeJSON = function () {
     can: permissionMap(this),
     permissions: this.permissions || {},
     permissionDetail: effectivePermissions(this),
+    allowedCampaigns: (this.allowedCampaigns || []).map(String),
     dashboard: this.dashboard || [],
     calendarEmbedUrl: this.calendarEmbedUrl || '',
     smtp: this.smtp

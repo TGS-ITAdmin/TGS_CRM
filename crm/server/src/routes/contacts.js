@@ -1,6 +1,7 @@
 const express = require('express')
 const multer = require('multer')
 const { parse } = require('csv-parse/sync')
+const ExcelJS = require('exceljs')
 const {
   Contact, Company, Activity, Enrollment, Task, OutboxMessage, Suppression,
 } = require('../db')
@@ -507,19 +508,102 @@ function readCsv(buffer) {
   })
 }
 
+/* Excel support. Detected by content, not just the file name: an .xlsx is a
+ * zip archive (starts "PK"), the legacy .xls binary starts D0 CF 11 E0. */
+function fileKind(file) {
+  const b = file.buffer
+  const name = String(file.originalname || '').toLowerCase()
+  if (b.length >= 4 && b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04) return 'xlsx'
+  if (b.length >= 4 && b[0] === 0xd0 && b[1] === 0xcf && b[2] === 0x11 && b[3] === 0xe0) return 'xls'
+  if (name.endsWith('.xlsx')) return 'xlsx'
+  if (name.endsWith('.xls')) return 'xls'
+  return 'csv'
+}
+
+// An Excel cell can hold rich text, a hyperlink, a formula or a date. The
+// importer wants the text a person would see in the cell.
+function cellText(value) {
+  if (value === null || value === undefined) return ''
+  if (value instanceof Date) return value.toISOString().slice(0, 10)
+  if (typeof value === 'object') {
+    if (Array.isArray(value.richText)) return value.richText.map((r) => r.text || '').join('')
+    if (value.hyperlink !== undefined) {
+      const text = cellText(value.text).trim()
+      const link = String(value.hyperlink || '').trim()
+      // A LinkedIn column often shows "View profile" and hides the real URL,
+      // so a web link wins over label text. Email links keep the visible
+      // address, never the "mailto:" form.
+      if (/^https?:\/\//i.test(link) && !/^https?:\/\//i.test(text)) return link
+      return text || link.replace(/^mailto:/i, '')
+    }
+    if (value.result !== undefined) return cellText(value.result)
+    if (value.text !== undefined) return cellText(value.text)
+    if (value.error) return ''
+    return ''
+  }
+  return String(value)
+}
+
+async function readXlsx(buffer) {
+  const workbook = new ExcelJS.Workbook()
+  await workbook.xlsx.load(buffer)
+  // First sheet that actually has data — exports often lead with a cover tab.
+  const sheet = workbook.worksheets.find((ws) => ws.actualRowCount > 0)
+  if (!sheet) return []
+
+  const grid = []
+  sheet.eachRow({ includeEmpty: false }, (row) => {
+    const values = []
+    row.eachCell({ includeEmpty: true }, (cell, col) => { values[col - 1] = cellText(cell.value).trim() })
+    if (values.some((v) => v)) grid.push(values)
+  })
+  if (!grid.length) return []
+
+  // Header row: blank headers get a name, repeated headers get a suffix, so
+  // no column silently overwrites another.
+  const seen = new Map()
+  const headers = grid[0].map((h, i) => {
+    let name = (h || '').trim() || `Column ${i + 1}`
+    const n = (seen.get(name) || 0) + 1
+    seen.set(name, n)
+    if (n > 1) name = `${name} (${n})`
+    return name
+  })
+
+  return grid.slice(1).map((values) => {
+    const row = {}
+    headers.forEach((h, i) => { row[h] = values[i] || '' })
+    return row
+  })
+}
+
+/* One entry point for every accepted format. Returns plain row objects keyed
+ * by header, exactly like the CSV reader, so the rest of the import is shared. */
+async function readRows(file) {
+  const kind = fileKind(file)
+  if (kind === 'xls') {
+    const err = new Error('Old .xls files are not supported. In Excel, use File → Save As → Excel Workbook (.xlsx) or CSV, then upload that.')
+    err.status = 400
+    throw err
+  }
+  if (kind === 'xlsx') return readXlsx(file.buffer)
+  return readCsv(file.buffer)
+}
+
 const IMPORT_FIELDS = [
   ...EDITABLE,
   'companyName',
   ...COMPANY_FIELDS.map((f) => `company_${f}`),
 ]
 
-router.post('/import/preview', requirePermission('contacts.import'), upload.single('file'), (req, res) => {
+router.post('/import/preview', requirePermission('contacts.import'), upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' })
   let rows
   try {
-    rows = readCsv(req.file.buffer)
+    rows = await readRows(req.file)
   } catch (err) {
-    return res.status(400).json({ error: `Could not read that CSV: ${err.message}` })
+    if (err.status === 400) return res.status(400).json({ error: err.message })
+    return res.status(400).json({ error: `Could not read that file: ${err.message}` })
   }
   if (!rows.length) return res.status(400).json({ error: 'That file has no data rows' })
 
@@ -579,9 +663,10 @@ router.post('/import', requirePermission('contacts.import'), upload.single('file
 
   let rows
   try {
-    rows = readCsv(req.file.buffer)
+    rows = await readRows(req.file)
   } catch (err) {
-    return res.status(400).json({ error: `Could not read that CSV: ${err.message}` })
+    if (err.status === 400) return res.status(400).json({ error: err.message })
+    return res.status(400).json({ error: `Could not read that file: ${err.message}` })
   }
   if (rows.length > 25000) {
     return res.status(400).json({ error: 'Import at most 25,000 rows per file' })
