@@ -47,7 +47,8 @@ export default function ImportContacts() {
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState(null)
 
-  async function analyse(f) {
+  // `sheet` is only passed when the user picks a different tab of an Excel file.
+  async function analyse(f, sheet) {
     if (!f) return
     setFile(f)
     setBusy(true)
@@ -55,6 +56,7 @@ export default function ImportContacts() {
     try {
       const fd = new FormData()
       fd.append('file', f)
+      if (sheet) fd.append('sheet', sheet)
       const data = await api.importPreview(fd)
       setPreview(data)
       setMapping(data.suggestedMapping)
@@ -72,7 +74,8 @@ export default function ImportContacts() {
       const fd = new FormData()
       fd.append('file', file)
       fd.append('mapping', JSON.stringify(mapping))
-      fd.append('options', JSON.stringify(options))
+      // Read the same Excel sheet the mapping was built from.
+      fd.append('options', JSON.stringify({ ...options, sheet: preview?.sheet || undefined }))
       const { result } = await api.importCommit(fd)
       setResult(result)
       toast.success(`${result.created} contacts created`)
@@ -190,10 +193,29 @@ export default function ImportContacts() {
             <div className="banner banner-info">
               <span>✓</span>
               <div>
-                <strong>{preview.rowCount.toLocaleString()} rows</strong> found in {file.name}.
+                <strong>{preview.rowCount.toLocaleString()} rows</strong> found in {file.name}
+                {preview.sheet && <> (sheet <strong>{preview.sheet}</strong>, column names read from row {preview.headerRow})</>}.
                 We matched {mappedCount} column{mappedCount === 1 ? '' : 's'} automatically — check them below.
               </div>
             </div>
+
+            {preview.sheets?.length > 1 && (
+              <div className="card" style={{ marginBottom: 14 }}>
+                <div className="card-body">
+                  <div className="field" style={{ marginBottom: 0, maxWidth: 420 }}>
+                    <label className="label">This workbook has {preview.sheets.length} sheets — import from</label>
+                    <select className="select" value={preview.sheet}
+                      onChange={(e) => analyse(file, e.target.value)}>
+                      {preview.sheets.map((sh) => (
+                        <option key={sh.name} value={sh.name}>
+                          {sh.name} ({sh.rows.toLocaleString()} row{sh.rows === 1 ? '' : 's'})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div className="card" style={{ marginBottom: 14 }}>
               <div className="card-head"><h2>Map your columns</h2></div>

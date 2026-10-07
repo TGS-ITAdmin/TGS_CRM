@@ -544,50 +544,147 @@ function cellText(value) {
   return String(value)
 }
 
-async function readXlsx(buffer) {
-  const workbook = new ExcelJS.Workbook()
-  await workbook.xlsx.load(buffer)
-  // First sheet that actually has data — exports often lead with a cover tab.
-  const sheet = workbook.worksheets.find((ws) => ws.actualRowCount > 0)
-  if (!sheet) return []
+/* Column-name patterns used both to guess the mapping and, for Excel, to
+ * find which row actually holds the headers. */
+const HEADER_PATTERNS = {
+  firstName: /^(first[\s_-]*name|fname|given)/i,
+  lastName: /^(last[\s_-]*name|lname|surname|family)/i,
+  email: /e[\s_-]?mail/i,
+  phone: /^(phone|tel|direct)/i,
+  mobile: /(mobile|cell)/i,
+  title: /(title|position|role|job)/i,
+  linkedinUrl: /(linked\s*in|li[\s_-]*url|profile[\s_-]*url)/i,
+  location: /(location|city|country|region)/i,
+  timezone: /(time\s*zone|timezone|tz)/i,
+  companyName: /(company|organi[sz]ation|account|employer)/i,
+  company_website: /(website|site|domain)/i,
+  company_industry: /industry|vertical|sector/i,
+  company_employeeCount: /(company size|employees|headcount)/i,
+  company_linkedinUrl: /(company.*linked|linked.*company)/i,
+  company_seatsNeeded: /(seats|fte|agents needed)/i,
+  company_targetRoles: /(target roles|roles needed)/i,
+  company_currentProvider: /(current provider|incumbent|existing vendor)/i,
+  company_contractTiming: /(timing|timeline|renewal)/i,
+  company_budgetRange: /budget/i,
+  tags: /^tags?$/i,
+  notes: /(notes?|comment)/i,
+}
 
+// How much a row looks like a header row: recognised column names count
+// most, other short labels a little. Emails, URLs and numbers count nothing —
+// those are data, not headers.
+function headerScore(values) {
+  let recognised = 0
+  let labels = 0
+  for (const raw of values) {
+    const v = String(raw || '').trim()
+    if (!v || v.length > 60) continue
+    if (/@|^https?:\/\/|^www\./i.test(v) || /^[\d\s()+.,:/-]+$/.test(v)) continue
+    if (Object.values(HEADER_PATTERNS).some((rx) => rx.test(v))) recognised++
+    else labels++
+  }
+  return { recognised, score: recognised * 3 + labels }
+}
+
+function sheetGrid(sheet) {
   const grid = []
   sheet.eachRow({ includeEmpty: false }, (row) => {
     const values = []
     row.eachCell({ includeEmpty: true }, (cell, col) => { values[col - 1] = cellText(cell.value).trim() })
-    if (values.some((v) => v)) grid.push(values)
+    for (let i = 0; i < values.length; i++) if (values[i] === undefined) values[i] = ''
+    if (values.some((v) => v)) grid.push({ rowNumber: row.number, values })
   })
-  if (!grid.length) return []
+  return grid
+}
 
-  // Header row: blank headers get a name, repeated headers get a suffix, so
-  // no column silently overwrites another.
+/* Pick the header row among the first rows of a sheet. Spreadsheets often
+ * open with a title ("Leads – October"), a date or a blank line before the
+ * real column names, which made row 1 the wrong choice. */
+function findHeader(grid) {
+  let best = { index: 0, recognised: 0, score: -1 }
+  for (let i = 0; i < Math.min(grid.length, 15); i++) {
+    const { recognised, score } = headerScore(grid[i].values)
+    if (score > best.score) best = { index: i, recognised, score }
+  }
+  return best
+}
+
+async function readXlsx(buffer, wantedSheet) {
+  const workbook = new ExcelJS.Workbook()
+  await workbook.xlsx.load(buffer)
+
+  // Visible sheets with data, each with its own best header row.
+  const candidates = workbook.worksheets
+    .filter((ws) => ws.state !== 'hidden' && ws.state !== 'veryHidden')
+    .map((ws) => {
+      const grid = sheetGrid(ws)
+      const header = grid.length ? findHeader(grid) : null
+      return { ws, grid, header, dataRows: header ? grid.length - header.index - 1 : 0 }
+    })
+    .filter((c) => c.grid.length)
+  if (!candidates.length) return { rows: [], meta: { sheets: [], sheet: '', headerRow: null } }
+
+  /* Which sheet: the one the user picked; otherwise the sheet that was open
+     when the file was saved (what "Save as CSV" would have exported), if it
+     looks like a contact list; otherwise the most contact-list-like sheet.
+     Picking simply the first sheet broke workbooks that lead with a summary
+     or instructions tab. */
+  const activeIndex = workbook.views?.[0]?.activeTab
+  const active = activeIndex !== undefined ? workbook.worksheets[activeIndex] : null
+  let chosen = wantedSheet && candidates.find((c) => c.ws.name === wantedSheet)
+  if (!chosen && active) {
+    const c = candidates.find((x) => x.ws === active)
+    if (c && c.header.recognised > 0) chosen = c
+  }
+  if (!chosen) {
+    chosen = [...candidates].sort((a, b) =>
+      (b.header.recognised - a.header.recognised) || (b.dataRows - a.dataRows))[0]
+  }
+
+  // Blank headers get a name, repeated headers get a suffix, so no column
+  // silently overwrites another.
+  const headerValues = chosen.grid[chosen.header.index].values
+  const width = Math.max(headerValues.length, ...chosen.grid.map((r) => r.values.length))
   const seen = new Map()
-  const headers = grid[0].map((h, i) => {
-    let name = (h || '').trim() || `Column ${i + 1}`
+  const headers = []
+  for (let i = 0; i < width; i++) {
+    let name = (headerValues[i] || '').trim() || `Column ${i + 1}`
     const n = (seen.get(name) || 0) + 1
     seen.set(name, n)
     if (n > 1) name = `${name} (${n})`
-    return name
-  })
+    headers.push(name)
+  }
 
-  return grid.slice(1).map((values) => {
+  const rows = chosen.grid.slice(chosen.header.index + 1).map(({ values }) => {
     const row = {}
     headers.forEach((h, i) => { row[h] = values[i] || '' })
     return row
   })
+
+  return {
+    rows,
+    meta: {
+      sheets: candidates.map((c) => ({ name: c.ws.name, rows: Math.max(0, c.dataRows) })),
+      sheet: chosen.ws.name,
+      headerRow: chosen.grid[chosen.header.index].rowNumber,
+      // In sheet order. Object.keys would move headers like "2026" first.
+      headers,
+    },
+  }
 }
 
 /* One entry point for every accepted format. Returns plain row objects keyed
- * by header, exactly like the CSV reader, so the rest of the import is shared. */
-async function readRows(file) {
+ * by header, exactly like the CSV reader, so the rest of the import is shared.
+ * `meta` describes the Excel sheet that was read (null for CSV). */
+async function readRows(file, sheet) {
   const kind = fileKind(file)
   if (kind === 'xls') {
     const err = new Error('Old .xls files are not supported. In Excel, use File → Save As → Excel Workbook (.xlsx) or CSV, then upload that.')
     err.status = 400
     throw err
   }
-  if (kind === 'xlsx') return readXlsx(file.buffer)
-  return readCsv(file.buffer)
+  if (kind === 'xlsx') return readXlsx(file.buffer, sheet)
+  return { rows: readCsv(file.buffer), meta: null }
 }
 
 const IMPORT_FIELDS = [
@@ -598,39 +695,23 @@ const IMPORT_FIELDS = [
 
 router.post('/import/preview', requirePermission('contacts.import'), upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' })
-  let rows
+  let rows, meta
   try {
-    rows = await readRows(req.file)
+    ({ rows, meta } = await readRows(req.file, req.body?.sheet))
   } catch (err) {
     if (err.status === 400) return res.status(400).json({ error: err.message })
     return res.status(400).json({ error: `Could not read that file: ${err.message}` })
   }
-  if (!rows.length) return res.status(400).json({ error: 'That file has no data rows' })
-
-  const headers = Object.keys(rows[0])
-  const patterns = {
-    firstName: /^(first[\s_-]*name|fname|given)/i,
-    lastName: /^(last[\s_-]*name|lname|surname|family)/i,
-    email: /e[\s_-]?mail/i,
-    phone: /^(phone|tel|direct)/i,
-    mobile: /(mobile|cell)/i,
-    title: /(title|position|role|job)/i,
-    linkedinUrl: /(linked\s*in|li[\s_-]*url|profile[\s_-]*url)/i,
-    location: /(location|city|country|region)/i,
-    timezone: /(time\s*zone|timezone|tz)/i,
-    companyName: /(company|organi[sz]ation|account|employer)/i,
-    company_website: /(website|site|domain)/i,
-    company_industry: /industry|vertical|sector/i,
-    company_employeeCount: /(company size|employees|headcount)/i,
-    company_linkedinUrl: /(company.*linked|linked.*company)/i,
-    company_seatsNeeded: /(seats|fte|agents needed)/i,
-    company_targetRoles: /(target roles|roles needed)/i,
-    company_currentProvider: /(current provider|incumbent|existing vendor)/i,
-    company_contractTiming: /(timing|timeline|renewal)/i,
-    company_budgetRange: /budget/i,
-    tags: /^tags?$/i,
-    notes: /(notes?|comment)/i,
+  if (!rows.length) {
+    return res.status(400).json({
+      error: meta?.sheet
+        ? `The sheet "${meta.sheet}" has no data rows under its headers.`
+        : 'That file has no data rows',
+    })
   }
+
+  const headers = meta?.headers || Object.keys(rows[0])
+  const patterns = HEADER_PATTERNS
   const guesses = {}
   for (const header of headers) {
     for (const [field, rx] of Object.entries(patterns)) {
@@ -648,6 +729,10 @@ router.post('/import/preview', requirePermission('contacts.import'), upload.sing
     sample: rows.slice(0, 5),
     suggestedMapping: guesses,
     importableFields: IMPORT_FIELDS,
+    // Excel only: which sheet and header row were used, and the other sheets.
+    sheet: meta?.sheet || null,
+    sheets: meta?.sheets || [],
+    headerRow: meta?.headerRow || null,
   })
 })
 
@@ -663,7 +748,8 @@ router.post('/import', requirePermission('contacts.import'), upload.single('file
 
   let rows
   try {
-    rows = await readRows(req.file)
+    // Same sheet the preview used, so the mapping lines up with the columns.
+    ({ rows } = await readRows(req.file, options.sheet))
   } catch (err) {
     if (err.status === 400) return res.status(400).json({ error: err.message })
     return res.status(400).json({ error: `Could not read that file: ${err.message}` })
