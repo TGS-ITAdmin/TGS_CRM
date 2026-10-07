@@ -152,6 +152,7 @@ export const api = {
   createCompany: (body) => request('POST', '/api/companies', body),
   updateCompany: (id, body) => request('PUT', `/api/companies/${id}`, body),
   deleteCompany: (id, force) => request('DELETE', `/api/companies/${id}${qs({ force })}`),
+  bulkDeleteCompanies: (body) => request('POST', '/api/companies/bulk-delete', body),
   addContactToCompany: (id, body) => request('POST', `/api/companies/${id}/contacts`, body),
   searchCompanies: (q) => request('GET', `/api/companies/search/quick${qs({ q })}`),
 

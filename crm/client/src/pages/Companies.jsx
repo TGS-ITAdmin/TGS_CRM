@@ -19,6 +19,12 @@ export default function Companies() {
   const [editing, setEditing] = useState(null)
   const [deleting, setDeleting] = useState(null)
 
+  // Multi-select for bulk delete. `allMatching` widens the selection from the
+  // ticked rows to every company matching the current filters, across pages.
+  const [selected, setSelected] = useState(new Set())
+  const [allMatching, setAllMatching] = useState(false)
+  const [bulkDeleting, setBulkDeleting] = useState(false)
+
   const canEdit = can('contacts.edit')
   const canDelete = can('contacts.delete')
   const showActions = canEdit || canDelete
@@ -66,6 +72,55 @@ export default function Companies() {
   useEffect(() => { load() }, [load])
 
   const items = data?.items || []
+  const total = data?.total || 0
+
+  // A new search, filter or page starts with nothing selected — a selection
+  // the user can no longer see must never be what a delete acts on.
+  useEffect(() => { setSelected(new Set()); setAllMatching(false) }, [query])
+
+  const pageAllChecked = items.length > 0 && items.every((c) => selected.has(c._id))
+  const selectionCount = allMatching ? total : selected.size
+
+  function toggleRow(id) {
+    setAllMatching(false)
+    setSelected((s) => {
+      const next = new Set(s)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  function togglePage() {
+    setAllMatching(false)
+    setSelected(pageAllChecked ? new Set() : new Set(items.map((c) => c._id)))
+  }
+
+  function clearSelection() {
+    setSelected(new Set())
+    setAllMatching(false)
+  }
+
+  async function runBulkDelete() {
+    try {
+      const body = allMatching
+        ? { allMatching: true, filters: { q: query.q, industry: query.industry, owner: query.owner } }
+        : { ids: [...selected] }
+      const res = await api.bulkDeleteCompanies(body)
+      let msg = `${res.deleted} compan${res.deleted === 1 ? 'y' : 'ies'} deleted`
+      if (res.detachedContacts) msg += ` · ${res.detachedContacts} contact${res.detachedContacts === 1 ? '' : 's'} kept and detached`
+      toast.success(msg)
+      if (res.skipped) {
+        toast.error(
+          `${res.skipped} skipped because they have deals: ${res.skippedNames.join(', ')}${res.skipped > res.skippedNames.length ? '…' : ''}. Delete or move those deals first.`
+        )
+      }
+      setBulkDeleting(false)
+      clearSelection()
+      load()
+    } catch (err) {
+      toast.error(err.message)
+    }
+  }
 
   return (
     <>
@@ -130,6 +185,33 @@ export default function Companies() {
           </div>
         </div>
 
+        {canDelete && selectionCount > 0 && (
+          <div className="banner banner-info" style={{ alignItems: 'center', marginBottom: 14 }}>
+            <div style={{ flex: 1 }}>
+              <strong>
+                {allMatching
+                  ? `All ${num(total)} matching companies selected`
+                  : `${selected.size} selected`}
+              </strong>
+              {!allMatching && pageAllChecked && total > items.length && (
+                <>
+                  {' · '}
+                  <button className="btn btn-ghost btn-sm" style={{ padding: '0 4px' }}
+                    onClick={() => setAllMatching(true)}>
+                    Select all {num(total)} matching companies
+                  </button>
+                </>
+              )}
+            </div>
+            <div className="row" style={{ gap: 6 }}>
+              <button className="btn btn-sm" onClick={clearSelection}>Clear</button>
+              <button className="btn btn-danger btn-sm" onClick={() => setBulkDeleting(true)}>
+                Delete {num(selectionCount)}
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="card">
           {loading ? (
             <Loading />
@@ -145,6 +227,12 @@ export default function Companies() {
               <table className="data">
                 <thead>
                   <tr>
+                    {canDelete && (
+                      <th className="checkcol">
+                        <input type="checkbox" className="checkbox" checked={pageAllChecked}
+                          title="Select every company on this page" onChange={togglePage} />
+                      </th>
+                    )}
                     <th>Company</th><th>Industry</th><th className="right">Contacts</th>
                     <th className="right">Seats</th><th>Target roles</th><th>Owner</th>
                     <th>Last activity</th>
@@ -153,7 +241,13 @@ export default function Companies() {
                 </thead>
                 <tbody>
                   {items.map((c) => (
-                    <tr key={c._id}>
+                    <tr key={c._id} className={allMatching || selected.has(c._id) ? 'selected' : ''}>
+                      {canDelete && (
+                        <td className="checkcol">
+                          <input type="checkbox" className="checkbox"
+                            checked={allMatching || selected.has(c._id)} onChange={() => toggleRow(c._id)} />
+                        </td>
+                      )}
                       <td>
                         <Link to={`/companies/${c._id}`} className="strong">{c.name}</Link>
                         <div className="small faint truncate" style={{ maxWidth: 240 }}>
@@ -225,6 +319,21 @@ export default function Companies() {
             }}
           />
         </Modal>
+      )}
+
+      {bulkDeleting && (
+        <Confirm
+          danger title={`Delete ${num(selectionCount)} compan${selectionCount === 1 ? 'y' : 'ies'}`}
+          confirmLabel={`Delete ${num(selectionCount)}`}
+          message={
+            (allMatching
+              ? `Every company matching the current search and filters — ${num(total)} in total, across all pages — will be deleted. `
+              : `The ${selected.size} selected compan${selected.size === 1 ? 'y' : 'ies'} will be deleted. `) +
+            'Their contacts are kept and simply detached. Companies that still have deals are skipped. This cannot be undone.'
+          }
+          onClose={() => setBulkDeleting(false)}
+          onConfirm={runBulkDelete}
+        />
       )}
 
       {deleting && (

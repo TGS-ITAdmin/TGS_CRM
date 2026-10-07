@@ -27,20 +27,88 @@ function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-router.get('/', async (req, res) => {
-  const page = Math.max(1, parseInt(req.query.page, 10) || 1)
-  const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50))
+/* The list filters, shared by the list and by "delete everything matching".
+ * Values are forced to strings so a crafted query cannot smuggle in a Mongo
+ * operator ({ $ne: ... }) — that matters most for a delete. */
+function buildListFilter(src = {}) {
+  const str = (v) => (v === undefined || v === null ? '' : String(Array.isArray(v) ? v[0] : v)).trim()
   const filter = {}
+  if (str(src.industry)) filter.industry = str(src.industry)
+  if (str(src.owner)) {
+    // A malformed owner id matches nothing — never "ignore it", which on a
+    // bulk delete would quietly widen the filter to every owner.
+    if (/^[0-9a-f]{24}$/i.test(str(src.owner))) filter.owner = str(src.owner)
+    else filter._id = { $in: [] }
+  }
+  if (str(src.tag)) filter.tags = str(src.tag)
 
-  if (req.query.industry) filter.industry = req.query.industry
-  if (req.query.owner) filter.owner = req.query.owner
-  if (req.query.tag) filter.tags = req.query.tag
-
-  const q = (req.query.q || '').trim()
+  const q = str(src.q)
   if (q) {
     const rx = new RegExp(escapeRegex(q), 'i')
     filter.$or = [{ name: rx }, { domain: rx }, { website: rx }, { industry: rx }]
   }
+  return filter
+}
+
+const BULK_DELETE_MAX = 5000
+
+/* Delete several companies at once: either the ids ticked on the page, or
+ * every company matching the current filters. Same rules as deleting one:
+ * a company with deals is skipped (a deal cannot exist without its company),
+ * and contacts are detached and kept, never deleted.
+ * Registered before the '/:id' routes so 'bulk-delete' is never read as an id. */
+router.post('/bulk-delete', requirePermission('contacts.delete'), async (req, res) => {
+  const { ids, allMatching, filters } = req.body || {}
+
+  let filter
+  if (allMatching) {
+    filter = buildListFilter(filters || {})
+  } else {
+    if (!Array.isArray(ids) || !ids.length) {
+      return res.status(400).json({ error: 'No companies selected' })
+    }
+    const clean = [...new Set(ids.map(String))].filter((id) => /^[0-9a-f]{24}$/i.test(id))
+    if (!clean.length) return res.status(400).json({ error: 'No valid companies selected' })
+    filter = { _id: { $in: clean } }
+  }
+
+  const targets = await Company.find(filter).select('_id name').limit(BULK_DELETE_MAX + 1).lean()
+  if (targets.length > BULK_DELETE_MAX) {
+    return res.status(400).json({
+      error: `That would delete more than ${BULK_DELETE_MAX.toLocaleString()} companies at once. Narrow the filter and run it in parts.`,
+    })
+  }
+  if (!targets.length) return res.json({ deleted: 0, detachedContacts: 0, skipped: 0, skippedNames: [] })
+
+  const targetIds = targets.map((t) => t._id)
+  const withDeals = new Set(
+    (await Deal.distinct('company', { company: { $in: targetIds } })).map(String)
+  )
+  const deletable = targets.filter((t) => !withDeals.has(String(t._id))).map((t) => t._id)
+  const skipped = targets.filter((t) => withDeals.has(String(t._id)))
+
+  let detachedContacts = 0
+  let deleted = 0
+  if (deletable.length) {
+    const detach = await Contact.updateMany({ company: { $in: deletable } }, { $set: { company: null } })
+    detachedContacts = detach.modifiedCount || 0
+    const result = await Company.deleteMany({ _id: { $in: deletable } })
+    deleted = result.deletedCount || 0
+  }
+
+  res.json({
+    deleted,
+    detachedContacts,
+    skipped: skipped.length,
+    // Enough names to act on, without sending thousands back.
+    skippedNames: skipped.slice(0, 20).map((t) => t.name),
+  })
+})
+
+router.get('/', async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1)
+  const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50))
+  const filter = buildListFilter(req.query)
 
   const sortField = ['createdAt', 'lastActivityAt', 'name', 'seatsNeeded'].includes(req.query.sort)
     ? req.query.sort
