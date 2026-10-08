@@ -162,7 +162,9 @@ export default function ContactDetail() {
                       <div className="work-row" style={{ cursor: 'default' }}>
                         <div className="work-main">
                           <div className="work-name">
-                            <Link to={`/campaigns/${e.campaign?._id}`}>{e.campaign?.name || '(deleted)'}</Link>
+                            {e.campaign
+                              ? <Link to={`/campaigns/${e.campaign._id}`}>{e.campaign.name}</Link>
+                              : <span className="faint">(deleted campaign)</span>}
                             {e.status !== 'active' && (
                               <span className="tag" style={{ marginLeft: 8 }}>{e.status}</span>
                             )}

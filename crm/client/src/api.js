@@ -172,7 +172,7 @@ export const api = {
   getCampaign: (id) => request('GET', `/api/campaigns/${id}`),
   createCampaign: (body) => request('POST', '/api/campaigns', body),
   updateCampaign: (id, body) => request('PUT', `/api/campaigns/${id}`, body),
-  archiveCampaign: (id, force) => request('DELETE', `/api/campaigns/${id}${qs({ force })}`),
+  deleteCampaign: (id, force) => request('DELETE', `/api/campaigns/${id}${qs({ force })}`),
   previewStage: (id, index, contactId) =>
     request('POST', `/api/campaigns/${id}/stages/${index}/preview`, { contactId }),
   getBoard: (id) => request('GET', `/api/campaigns/${id}/board`),

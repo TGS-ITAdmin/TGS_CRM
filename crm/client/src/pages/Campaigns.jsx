@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import { useToast } from '../components/Toast.jsx'
-import { Channel, Empty, Field, Loading, Modal } from '../components/ui.jsx'
+import { Channel, Confirm, Empty, Field, Loading, Modal } from '../components/ui.jsx'
 import { num } from '../components/format.js'
 
 /* Starter templates. A blank campaign editor is where most CRMs lose people —
@@ -59,6 +59,22 @@ export default function Campaigns() {
   const navigate = useNavigate()
   const [campaigns, setCampaigns] = useState(null)
   const [creating, setCreating] = useState(false)
+  const [deleting, setDeleting] = useState(null)
+
+  async function deleteCampaign(c) {
+    try {
+      const res = await api.deleteCampaign(c._id, true)
+      toast.success(
+        res.exited
+          ? `"${c.name}" deleted · ${res.exited} contact${res.exited === 1 ? '' : 's'} taken out of it`
+          : `"${c.name}" deleted`
+      )
+      setDeleting(null)
+      load()
+    } catch (err) {
+      toast.error(err.message)
+    }
+  }
 
   async function load() {
     try {
@@ -125,6 +141,12 @@ export default function Campaigns() {
                     <Link className="btn btn-sm" to={`/board/${c._id}`}>Board</Link>
                     <Link className="btn btn-sm" to={`/reports?campaign=${c._id}&tab=funnel`}>Funnel</Link>
                     <Link className="btn btn-sm btn-ghost" to={`/contacts?campaign=${c._id}`}>Contacts</Link>
+                    {can('campaigns.manage') && (
+                      <>
+                        <div className="spacer" />
+                        <button className="btn btn-danger btn-sm" onClick={() => setDeleting(c)}>Delete</button>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -132,6 +154,21 @@ export default function Campaigns() {
           </div>
         )}
       </div>
+
+      {deleting && (
+        <Confirm
+          danger title={`Delete "${deleting.name}"`} confirmLabel="Delete campaign"
+          message={
+            (deleting.counts?.active > 0
+              ? `${num(deleting.counts.active)} contact${deleting.counts.active === 1 ? ' is' : 's are'} still running in this campaign. ` +
+                'They will be taken out of it, and their pending tasks and queued emails cancelled. '
+              : '') +
+            'The contacts themselves and everything already on their timelines are kept. The campaign, its stages and its messages are deleted. This cannot be undone.'
+          }
+          onClose={() => setDeleting(null)}
+          onConfirm={() => deleteCampaign(deleting)}
+        />
+      )}
 
       {creating && (
         <NewCampaign

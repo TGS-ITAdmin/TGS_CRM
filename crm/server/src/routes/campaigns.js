@@ -1,5 +1,5 @@
 const express = require('express')
-const { Campaign, Enrollment, Contact, Task, OutboxMessage, CHANNELS } = require('../db')
+const { Campaign, Enrollment, Contact, Task, OutboxMessage, User, CHANNELS } = require('../db')
 const { requireAuth, requirePermission, ownerScope } = require('../middleware/auth')
 const { canUseCampaign } = require('../lib/permissions')
 const { enroll, advance, setStage, exitEnrollment, materializeStage, logActivity } = require('../lib/engine')
@@ -115,6 +115,10 @@ router.put('/:id', requirePermission('campaigns.manage'), async (req, res) => {
   res.json({ campaign: campaign.toJSON() })
 })
 
+/* Delete a campaign. Anyone still running in it is exited first, which
+ * cancels their pending tasks and queued emails, so nothing keeps firing for
+ * a campaign that no longer exists. The contacts themselves, and every
+ * activity already on their timelines, are kept. */
 router.delete('/:id', requirePermission('campaigns.manage'), async (req, res) => {
   const campaign = await Campaign.findById(req.params.id)
   if (!campaign) return res.status(404).json({ error: 'Campaign not found' })
@@ -123,19 +127,24 @@ router.delete('/:id', requirePermission('campaigns.manage'), async (req, res) =>
     return res.status(409).json({
       error: `${activeCount} contacts are still running in this campaign.`,
       activeCount,
-      hint: 'Pass force=true to exit them all and archive the campaign.',
+      hint: 'Pass force=true to exit them all and delete the campaign.',
     })
   }
+
   const enrollments = await Enrollment.find({ campaign: campaign._id, status: 'active' })
+  let cancelledTasks = 0
+  let cancelledMessages = 0
   for (const e of enrollments) {
-    await exitEnrollment({ enrollment: e, reason: 'Campaign deleted', actorId: req.user._id })
+    const cancelled = await exitEnrollment({ enrollment: e, reason: `Campaign "${campaign.name}" deleted`, actorId: req.user._id })
+    cancelledTasks += cancelled?.tasksCancelled || 0
+    cancelledMessages += cancelled?.messagesCancelled || 0
   }
-  // Keep the campaign row so historical activity still resolves its name;
-  // deactivating is the honest operation here.
-  campaign.active = false
-  campaign.name = `${campaign.name} (archived)`
-  await campaign.save()
-  res.json({ ok: true, archived: true, exited: enrollments.length })
+
+  // Nobody should keep a campaign-access entry pointing at nothing.
+  await User.updateMany({ allowedCampaigns: campaign._id }, { $pull: { allowedCampaigns: campaign._id } })
+  await Campaign.deleteOne({ _id: campaign._id })
+
+  res.json({ ok: true, deleted: true, exited: enrollments.length, cancelledTasks, cancelledMessages })
 })
 
 /* ---- Preview a stage message merged against a real contact ---- */
