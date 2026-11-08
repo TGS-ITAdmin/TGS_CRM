@@ -24,6 +24,8 @@ export default function ContactForm({ initial, onSubmit, onCancel, submitLabel =
     customFields: initial?.customFields || {},
     company: initial?.company?._id || initial?.company || '',
     companyName: initial?.company?.name || initial?.companyName || '',
+    // Shown and edited here, stored on the company.
+    company_website: initial?.company?.website || '',
   })
   const [showCompanyDetail, setShowCompanyDetail] = useState(false)
   const [tagInput, setTagInput] = useState('')
@@ -68,13 +70,33 @@ export default function ContactForm({ initial, onSubmit, onCancel, submitLabel =
       </div>
 
       {!lockCompany && (
-        <Field label="Company">
-          <CompanyPicker
-            value={form.company}
-            name={form.companyName}
-            onChange={({ company, companyName }) => setForm((f) => ({ ...f, company, companyName }))}
-          />
-        </Field>
+        <div className="grid grid-2">
+          <Field label="Company">
+            <CompanyPicker
+              value={form.company}
+              name={form.companyName}
+              onChange={({ company, companyName, website }) => setForm((f) => ({
+                ...f,
+                company,
+                companyName,
+                // Picking a company shows its website; typing a new name keeps
+                // whatever was entered in the website box.
+                ...(company ? { company_website: website || '' } : {}),
+              }))}
+            />
+          </Field>
+          <Field
+            label="Company website"
+            hint={form.company
+              ? 'Saved on the company, so everyone there shares it.'
+              : 'Also helps match this to an existing company.'}
+          >
+            <input
+              className="input" value={form.company_website || ''} onChange={set('company_website')}
+              placeholder="www.company.com"
+            />
+          </Field>
+        </div>
       )}
 
       {isNewCompany && !lockCompany && (
@@ -88,7 +110,6 @@ export default function ContactForm({ initial, onSubmit, onCancel, submitLabel =
             </button>
             {showCompanyDetail && (
               <div className="grid grid-2" style={{ paddingBottom: 10 }}>
-                <Field label="Website"><input className="input" value={form.company_website || ''} onChange={set('company_website')} /></Field>
                 <Field label="Industry"><input className="input" value={form.company_industry || ''} onChange={set('company_industry')} /></Field>
                 <Field label="Company size"><input className="input" value={form.company_employeeCount || ''} onChange={set('company_employeeCount')} placeholder="50–200" /></Field>
                 <Field label="Seats needed"><input className="input" type="number" min="0" value={form.company_seatsNeeded || ''} onChange={set('company_seatsNeeded')} /></Field>

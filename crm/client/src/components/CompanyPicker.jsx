@@ -52,7 +52,7 @@ export default function CompanyPicker({ value, name, onChange, placeholder = 'St
   function pick(item) {
     setQuery(item.name)
     setOpen(false)
-    onChange({ company: item._id, companyName: item.name })
+    onChange({ company: item._id, companyName: item.name, website: item.website || '' })
   }
 
   return (

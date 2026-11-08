@@ -7,7 +7,7 @@ const {
 } = require('../db')
 const { requireAuth, requirePermission, ownerScope } = require('../middleware/auth')
 const { logActivity, suppressContactEverywhere } = require('../lib/engine')
-const { resolveCompany, domainFromEmail } = require('../lib/companies')
+const { resolveCompany, domainFromEmail, domainFromWebsite } = require('../lib/companies')
 const customFields = require('../lib/custom-fields')
 const { findContactDuplicates, mergeContacts, previewContactMerge } = require('../lib/dedupe')
 const { ensureDealForMeeting } = require('../lib/deals')
@@ -150,6 +150,32 @@ router.get('/:id', async (req, res) => {
   })
 })
 
+/* "acme.com" and "https://acme.com/" are the same site; store one form. */
+function cleanWebsite(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`
+  try {
+    const url = new URL(withScheme)
+    if (!url.hostname.includes('.')) return ''
+    return url.toString().replace(/\/$/, '')
+  } catch {
+    return ''
+  }
+}
+
+/* The contact form's "Company website" field. A website typed for a company
+ * that already exists fills it in or corrects it; an empty field never wipes
+ * a website someone else entered. */
+async function applyCompanyWebsite(company, body) {
+  if (!company || body.company_website === undefined) return
+  const website = cleanWebsite(body.company_website)
+  if (!website || website === company.website) return
+  company.website = website
+  if (!company.domain) company.domain = domainFromWebsite(website)
+  await company.save()
+}
+
 /* ---- Create ---- */
 async function attachCompany(doc, body, req) {
   if (body.company) {
@@ -158,6 +184,7 @@ async function attachCompany(doc, body, req) {
     if (existing) {
       doc.company = existing._id
       doc.companyName = existing.name
+      await applyCompanyWebsite(existing, body)
       return existing
     }
   }
@@ -168,10 +195,12 @@ async function attachCompany(doc, body, req) {
   for (const key of COMPANY_FIELDS) {
     if (body[`company_${key}`] !== undefined) extra[key] = body[`company_${key}`]
   }
+  const website = cleanWebsite(body.company_website)
+  if (website) extra.website = website
   const company = await resolveCompany({
     name,
     email: doc.email,
-    website: body.company_website,
+    website,
     extra,
     ownerId: doc.owner || req.user._id,
     source: doc.source || 'manual',
@@ -179,6 +208,8 @@ async function attachCompany(doc, body, req) {
   if (company) {
     doc.company = company._id
     doc.companyName = company.name
+    // Matched an existing company by domain or name: still record the website.
+    await applyCompanyWebsite(company, body)
   }
   return company
 }
@@ -566,6 +597,10 @@ const HEADER_PATTERNS = {
   company_currentProvider: /(current provider|incumbent|existing vendor)/i,
   company_contractTiming: /(timing|timeline|renewal)/i,
   company_budgetRange: /budget/i,
+  company_phone: /^(company|office|main|hq)[\s_-]*(phone|tel)/i,
+  company_location: /^(company|hq)[\s_-]*(location|city)|headquarters/i,
+  company_timezone: /^company[\s_-]*(time\s*zone|timezone|tz)/i,
+  company_address: /address/i,
   tags: /^tags?$/i,
   notes: /(notes?|comment)/i,
 }
@@ -693,6 +728,91 @@ const IMPORT_FIELDS = [
   ...COMPANY_FIELDS.map((f) => `company_${f}`),
 ]
 
+/* The names each field goes by: the label shown on the mapping screen first,
+ * then common spellings in exported lists. A column whose name is exactly one
+ * of these maps without any guessing — so a file using the CRM's own labels
+ * ("Company location", "Seats needed") always maps itself. */
+const FIELD_NAMES = {
+  firstName: ['First name', 'First', 'Given name', 'fname'],
+  lastName: ['Last name', 'Last', 'Surname', 'Family name', 'lname'],
+  title: ['Job title', 'Title', 'Position', 'Role', 'Designation'],
+  email: ['Work email', 'Email', 'Email address', 'E-mail', 'Business email'],
+  phone: ['Phone', 'Phone number', 'Direct phone', 'Direct dial', 'Telephone'],
+  mobile: ['Mobile', 'Mobile phone', 'Cell', 'Cell phone'],
+  linkedinUrl: ['LinkedIn URL', 'LinkedIn', 'Personal LinkedIn URL', 'LinkedIn profile', 'Profile URL'],
+  location: ['Location', 'City', 'Contact location'],
+  timezone: ['Timezone', 'Time zone', 'Their timezone'],
+  source: ['Source', 'Lead source'],
+  notes: ['Notes', 'Note', 'Comments'],
+  tags: ['Tags', 'Tag'],
+  companyName: ['Company name', 'Company', 'Organization', 'Organisation', 'Account', 'Account name', 'Business name'],
+  company_website: ['Company website', 'Website', 'Company URL', 'Domain', 'Web site'],
+  company_industry: ['Industry', 'Company industry', 'Vertical', 'Sector'],
+  company_employeeCount: ['Company size', 'Employees', 'Employee count', 'Headcount', '# Employees'],
+  company_linkedinUrl: ['Company LinkedIn', 'Company LinkedIn URL', 'Company LinkedIn page'],
+  company_phone: ['Company phone', 'Main phone', 'Office phone', 'Company phone number'],
+  company_location: ['Company location', 'Company city', 'HQ', 'HQ location', 'Headquarters'],
+  company_timezone: ['Company timezone', 'Company time zone'],
+  company_address: ['Company address', 'Address', 'Street address', 'Business address'],
+  company_seatsNeeded: ['Seats needed', 'Seats', 'FTE', 'Agents needed'],
+  company_targetRoles: ['Target roles', 'Roles needed'],
+  company_currentProvider: ['Current provider', 'Incumbent', 'Existing vendor'],
+  company_contractTiming: ['Contract timing', 'Timing', 'Renewal date'],
+  company_budgetRange: ['Budget range', 'Budget'],
+}
+
+// "Company  Location", "company_location" and "COMPANY-LOCATION:" are one name.
+function normHeader(h) {
+  return String(h || '').toLowerCase().replace(/[^a-z0-9#]+/g, ' ').trim()
+}
+
+/* Suggest a field for each column. Three passes, each only for columns and
+ * fields still free, so one column is never used twice:
+ *   1. the column name is exactly a known name for a field;
+ *   2. a column starting with "Company …" tries the company fields' patterns
+ *      (otherwise "Company location" was taken by the person's Location);
+ *   3. everything else tries the patterns in order. */
+function guessMapping(headers) {
+  const guesses = {}
+  const usedHeaders = new Set()
+  const assign = (field, header) => {
+    if (guesses[field] || usedHeaders.has(header)) return false
+    guesses[field] = header
+    usedHeaders.add(header)
+    return true
+  }
+
+  const byName = new Map()
+  for (const [field, names] of Object.entries(FIELD_NAMES)) {
+    for (const n of [field, ...names]) {
+      const key = normHeader(n)
+      if (!byName.has(key)) byName.set(key, field)
+    }
+  }
+  for (const header of headers) {
+    const field = byName.get(normHeader(header))
+    if (field) assign(field, header)
+  }
+
+  const entries = Object.entries(HEADER_PATTERNS)
+  const companyEntries = entries.filter(([f]) => f.startsWith('company_') || f === 'companyName')
+  for (const header of headers) {
+    if (usedHeaders.has(header)) continue
+    const list = /^(company|organi[sz]ation|account|business)\b/i.test(header.trim())
+      ? [...companyEntries, ...entries]
+      : entries
+    for (const [field, rx] of list) {
+      if (rx.test(header) && assign(field, header)) break
+    }
+  }
+
+  // The company LinkedIn column must not steal the personal one.
+  if (guesses.linkedinUrl && guesses.linkedinUrl === guesses.company_linkedinUrl) {
+    delete guesses.company_linkedinUrl
+  }
+  return guesses
+}
+
 router.post('/import/preview', requirePermission('contacts.import'), upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' })
   let rows, meta
@@ -711,17 +831,7 @@ router.post('/import/preview', requirePermission('contacts.import'), upload.sing
   }
 
   const headers = meta?.headers || Object.keys(rows[0])
-  const patterns = HEADER_PATTERNS
-  const guesses = {}
-  for (const header of headers) {
-    for (const [field, rx] of Object.entries(patterns)) {
-      if (!guesses[field] && rx.test(header)) { guesses[field] = header; break }
-    }
-  }
-  // The company LinkedIn column must not steal the personal one.
-  if (guesses.linkedinUrl && guesses.linkedinUrl === guesses.company_linkedinUrl) {
-    delete guesses.company_linkedinUrl
-  }
+  const guesses = guessMapping(headers)
 
   res.json({
     headers,

@@ -393,7 +393,7 @@ router.get('/search/quick', async (req, res) => {
   const filter = q
     ? { $or: [{ name: new RegExp(escapeRegex(q), 'i') }, { domain: new RegExp(escapeRegex(q), 'i') }] }
     : {}
-  const items = await Company.find(filter).select('name domain industry').sort({ name: 1 }).limit(20).lean()
+  const items = await Company.find(filter).select('name domain industry website').sort({ name: 1 }).limit(20).lean()
   res.json({ items })
 })
 
