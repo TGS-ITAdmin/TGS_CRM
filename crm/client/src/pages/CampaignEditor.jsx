@@ -100,7 +100,7 @@ export default function CampaignEditor() {
           <h1 className="truncate">{campaign.name}</h1>
           <div className="topbar-sub">
             {stages.length} stage{stages.length === 1 ? '' : 's'} · runs {totalDays} day{totalDays === 1 ? '' : 's'} end to end
-            {!campaign.active && ' · inactive'}
+            {!campaign.active && ' · paused'}
           </div>
         </div>
         <div className="spacer" />
@@ -137,7 +137,9 @@ export default function CampaignEditor() {
               <label className="row small">
                 <input type="checkbox" className="checkbox" checked={campaign.active}
                   onChange={(e) => patch((c) => { c.active = e.target.checked; return c })} />
-                Active — inactive campaigns are hidden from the enrol and move pickers
+                Active — turn off to pause: nobody moves to the next stage, its open tasks and emails are hidden
+                from My Day, the call list and Ready to Send, and no one can be added. Turning it back on picks up
+                where it left off.
               </label>
             )}
           </div>

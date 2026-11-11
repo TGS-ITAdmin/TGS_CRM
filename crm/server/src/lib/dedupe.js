@@ -179,12 +179,17 @@ async function mergeContacts({ survivorId, loserId, actorId }) {
 
   /* Suppression is OR-ed. Merging a live contact with one that opted out must
      never produce a contact you are allowed to email. */
-  const wasSuppressed = loser.doNotContact || loser.unsubscribedAt || loser.status === 'dnc'
-  if (wasSuppressed) {
-    survivor.doNotContact = true
-    if (loser.unsubscribedAt && !survivor.unsubscribedAt) survivor.unsubscribedAt = loser.unsubscribedAt
-    if (loser.status === 'dnc') survivor.status = 'dnc'
+  // Each channel separately: the stricter of the two wins.
+  if (loser.doNotContact) survivor.doNotContact = true
+  if (loser.unsubscribedAt && !survivor.unsubscribedAt) survivor.unsubscribedAt = loser.unsubscribedAt
+  const emailRank = { valid: 0, bounced: 1, unsubscribed: 2 }
+  if ((emailRank[loser.emailStatus] || 0) > (emailRank[survivor.emailStatus] || 0)) survivor.emailStatus = loser.emailStatus
+  if (survivor.unsubscribedAt) survivor.emailStatus = 'unsubscribed'
+  if (loser.dncStatus && loser.dncStatus !== 'clear' && (!survivor.dncStatus || survivor.dncStatus === 'clear')) {
+    survivor.dncStatus = loser.dncStatus
   }
+  if (loser.nurture) survivor.nurture = true
+  if (!survivor.lostReason && loser.lostReason) survivor.lostReason = loser.lostReason
 
   // Keep the earlier creation date — the relationship started when it started.
   if (loser.createdAt && loser.createdAt < survivor.createdAt) survivor.createdAt = loser.createdAt
@@ -314,7 +319,8 @@ async function previewContactMerge({ survivorId, loserId }) {
   return {
     survivor, loser, wouldFill, wouldDiscard,
     wouldMove: { activities, enrollments, tasks, messages, quotes, deals },
-    inheritsSuppression: !!(loser.doNotContact || loser.unsubscribedAt || loser.status === 'dnc'),
+    inheritsSuppression: !!(loser.doNotContact || loser.unsubscribedAt
+      || (loser.emailStatus && loser.emailStatus !== 'valid') || (loser.dncStatus && loser.dncStatus !== 'clear')),
   }
 }
 

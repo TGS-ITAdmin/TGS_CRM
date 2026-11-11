@@ -9,6 +9,7 @@ const {
 } = require('../db')
 const { renderStage } = require('./merge')
 const { suppressionReason } = require('./compliance')
+const { channelBlock } = require('./lifecycle')
 
 /* The stage engine.
  *
@@ -108,6 +109,23 @@ async function materializeStage({ enrollment, campaign, contact, stageIndex, act
     return { kind: 'outbox', id: msg._id, missing: merged.missing }
   }
 
+  /* Calls and LinkedIn follow their own suppression: a do-not-call status
+     stops calls only, and an email unsubscribe never stops a call. The step
+     is skipped and the reason logged; the campaign carries on. */
+  const blocked = channelBlock(contact, stage.channel)
+  if (blocked) {
+    await logActivity({
+      contact: contact._id,
+      type: 'step_skipped',
+      channel: stage.channel,
+      campaign: campaign._id,
+      stageIndex,
+      title: `${stage.channel === 'call' ? 'Call' : 'LinkedIn'} step skipped — ${stage.name}`,
+      body: blocked,
+    })
+    return { kind: 'skipped', reason: blocked }
+  }
+
   const verb = CHANNEL_VERB[stage.channel] || 'Follow up with'
   const task = await Task.create({
     ...base,
@@ -128,6 +146,9 @@ async function enroll({ contactId, campaignId, actorId }) {
   if (!campaign) throw Object.assign(new Error('Campaign not found'), { status: 404 })
   if (!campaign.stages.length) {
     throw Object.assign(new Error('That campaign has no stages yet'), { status: 400 })
+  }
+  if (campaign.active === false) {
+    throw Object.assign(new Error(`"${campaign.name}" is paused. Turn it back on before adding contacts.`), { status: 400 })
   }
 
   const already = await Enrollment.findOne({
@@ -376,7 +397,14 @@ async function exitEnrollment({ enrollment, reason, actorId }) {
 /* Scheduler tick. Processes everything whose dueAt has passed.
  * Batched so a backlog of thousands doesn't blow up memory. */
 async function runDueEnrollments({ limit = 500, now = new Date() } = {}) {
-  const due = await Enrollment.find({ status: 'active', dueAt: { $ne: null, $lte: now } })
+  /* A paused (inactive) campaign does not move anyone on. Its contacts stay
+     where they are and catch up when it is switched back on. */
+  const paused = await Campaign.find({ active: false }).distinct('_id')
+  const due = await Enrollment.find({
+    status: 'active',
+    dueAt: { $ne: null, $lte: now },
+    ...(paused.length ? { campaign: { $nin: paused } } : {}),
+  })
     .limit(limit)
     .exec()
 

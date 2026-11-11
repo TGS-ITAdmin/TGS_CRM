@@ -14,11 +14,13 @@ const BLANK = {
  * needed, current provider — lives on the Company and is edited there, so two
  * people at the same company can never disagree about it. */
 export default function ContactForm({ initial, onSubmit, onCancel, submitLabel = 'Save', lockCompany }) {
-  const { statuses, users, isAdmin, user, customFieldsFor } = useAuth()
+  const { statuses, users, isAdmin, user, customFieldsFor, statusRoles, lostReasons } = useAuth()
   const [form, setForm] = useState({
     ...BLANK,
     ...(initial || {}),
-    status: initial?.status || 'new',
+    status: initial?.status || statusRoles.created || statuses[0]?.value || 'new',
+    lostReason: initial?.lostReason || '',
+    nurture: !!initial?.nurture,
     owner: initial?.owner?._id || initial?.owner || user.id,
     tags: initial?.tags || [],
     customFields: initial?.customFields || {},
@@ -36,9 +38,16 @@ export default function ContactForm({ initial, onSubmit, onCancel, submitLabel =
   // Only sent when creating a brand-new company; ignored if one already exists.
   const isNewCompany = !form.company && !!form.companyName.trim()
 
+  const isLost = !!statusRoles.lost && form.status === statusRoles.lost
+
   async function submit(e) {
     e.preventDefault()
     setError('')
+    // Lost needs a reason (G17) — checked here so the form explains it.
+    if (isLost && !String(form.lostReason || '').trim()) {
+      setError('Pick a Lost reason — it is required when the status is Lost.')
+      return
+    }
     setBusy(true)
     try {
       await onSubmit(form)
@@ -138,6 +147,34 @@ export default function ContactForm({ initial, onSubmit, onCancel, submitLabel =
             {statuses.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
           </select>
         </Field>
+        {isLost ? (
+          <Field label="Lost reason (required)">
+            <select className="select" value={form.lostReason} onChange={set('lostReason')}>
+              <option value="">— choose a reason —</option>
+              {lostReasons.map((r) => <option key={r} value={r}>{r}</option>)}
+              {form.lostReason && !lostReasons.includes(form.lostReason) && (
+                <option value={form.lostReason}>{form.lostReason}</option>
+              )}
+            </select>
+          </Field>
+        ) : (
+          <Field label="Nurture">
+            <label className="row small" style={{ gap: 8, minHeight: 36, cursor: 'pointer' }}>
+              <input type="checkbox" className="checkbox" checked={form.nurture}
+                onChange={(e) => setForm((f) => ({ ...f, nurture: e.target.checked }))} />
+              On — keep them on the monthly nurture emails
+            </label>
+          </Field>
+        )}
+        {isLost && (
+          <Field label="Nurture">
+            <label className="row small" style={{ gap: 8, minHeight: 36, cursor: 'pointer' }}>
+              <input type="checkbox" className="checkbox" checked={form.nurture}
+                onChange={(e) => setForm((f) => ({ ...f, nurture: e.target.checked }))} />
+              On — Lost and still on the monthly nurture emails
+            </label>
+          </Field>
+        )}
         <Field label="Source"><input className="input" value={form.source} onChange={set('source')} /></Field>
         {isAdmin && (
           <Field label="Owner">

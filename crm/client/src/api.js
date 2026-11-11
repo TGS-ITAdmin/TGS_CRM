@@ -65,6 +65,8 @@ export const api = {
   bootstrap: () => request('GET', '/api/settings/bootstrap'),
   getSettings: () => request('GET', '/api/settings'),
   saveSettings: (body) => request('PUT', '/api/settings', body),
+  statusOrphans: () => request('GET', '/api/settings/status-orphans'),
+  remapStatusOrphans: (body) => request('POST', '/api/settings/status-orphans/remap', body),
   saveDealStages: (stages) => request('PUT', '/api/settings/deal-stages', { stages }),
   saveCurrencies: (currencies, reportingCurrency) =>
     request('PUT', '/api/settings/currencies', { currencies, reportingCurrency }),

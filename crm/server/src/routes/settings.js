@@ -14,6 +14,9 @@ const { currencyList } = require('../lib/money')
 const customFields = require('../lib/custom-fields')
 const { smtpStatus, verifySmtp } = require('../lib/mailer')
 const { suppressContactEverywhere, logActivity } = require('../lib/engine')
+const {
+  markLost, REASON_UNSUBSCRIBED, STATUS_ROLES, ROLE_KEYS, statusList, statusForRole, EMAIL_STATUSES, DNC_STATUSES,
+} = require('../lib/lifecycle')
 const { MERGE_FIELDS } = require('../lib/merge')
 const { domainOf } = require('../lib/compliance')
 
@@ -38,6 +41,14 @@ router.get('/bootstrap', async (req, res) => {
       brandColor: settings.brandColor || '#2563eb',
       quoteValidDays: settings.quoteValidDays ?? 30,
     },
+    // Which status the CRM sets on its own for each event (null = none).
+    statusRoles: Object.fromEntries(ROLE_KEYS.map((k) => [
+      k,
+      statusForRole(settings.contactStatuses?.length ? settings.contactStatuses : DEFAULT_STATUSES, k),
+    ])),
+    statusRoleCatalogue: STATUS_ROLES.map(({ key, label }) => ({ key, label })),
+    emailStatuses: EMAIL_STATUSES,
+    dncStatuses: DNC_STATUSES,
     quoteApproval: settings.quoteApproval || {},
     quoteStatuses: QUOTE_STATUSES,
     dealStages: stageList(settings),
@@ -90,15 +101,62 @@ router.put('/', requirePermission('settings.manage'), async (req, res) => {
     if (!Array.isArray(update.contactStatuses) || !update.contactStatuses.length) {
       return res.status(400).json({ error: 'At least one contact status is required' })
     }
-    update.contactStatuses = update.contactStatuses.map((s, i) => ({
-      value: String(s.value || '').trim() || `status_${i}`,
-      label: String(s.label || '').trim() || `Status ${i + 1}`,
-      color: s.color || '#64748b',
-      funnelOrder: Number.isFinite(s.funnelOrder) ? s.funnelOrder : i,
-    }))
+    const usedRoles = new Set()
+    update.contactStatuses = update.contactStatuses.map((s, i) => {
+      // Each automatic role can sit on one status only.
+      let role = ROLE_KEYS.includes(s.role) ? s.role : ''
+      if (role && usedRoles.has(role)) role = ''
+      if (role) usedRoles.add(role)
+      return {
+        value: String(s.value || '').trim() || `status_${i}`,
+        label: String(s.label || '').trim() || `Status ${i + 1}`,
+        color: s.color || '#64748b',
+        funnelOrder: Number.isFinite(s.funnelOrder) ? s.funnelOrder : i,
+        role,
+      }
+    })
+  }
+  if (update.lostReasons) {
+    update.lostReasons = [...new Set((Array.isArray(update.lostReasons) ? update.lostReasons : [])
+      .map((r) => String(r || '').trim()).filter(Boolean))]
   }
   const settings = await Settings.findOneAndUpdate({ key: 'global' }, { $set: update }, { new: true }).lean()
   res.json({ settings })
+})
+
+/* ---- Status clean-up ----
+ * Contacts whose status is no longer in the list (a status was deleted or its
+ * value changed) show up here, grouped, so an admin can move each group to a
+ * current status in one go. */
+router.get('/status-orphans', requirePermission('settings.manage'), async (req, res) => {
+  const list = await statusList()
+  const known = list.map((s) => s.value)
+  const groups = await Contact.aggregate([
+    { $match: { status: { $nin: known } } },
+    { $group: { _id: '$status', count: { $sum: 1 } } },
+    { $sort: { count: -1 } },
+  ])
+  res.json({ orphans: groups.map((g) => ({ status: g._id || '(none)', count: g.count })) })
+})
+
+router.post('/status-orphans/remap', requirePermission('settings.manage'), async (req, res) => {
+  const { from, to, lostReason, nurture } = req.body || {}
+  const list = await statusList()
+  if (!list.some((s) => s.value === to)) return res.status(400).json({ error: 'Pick a current status to move them to' })
+  if (list.some((s) => s.value === from)) return res.status(400).json({ error: 'That status is still in use — nothing to clean up' })
+  const isLost = statusForRole(list, 'lost') === to
+  const reason = String(lostReason || '').trim()
+  if (isLost && !reason) {
+    return res.status(400).json({ error: 'A Lost reason is required when moving contacts to Lost.', code: 'lost_reason_required' })
+  }
+  const filter = from === '(none)' ? { status: { $in: [null, ''] } } : { status: from }
+  const set = { status: to }
+  if (isLost) set.lostReason = reason
+  if (nurture) set.nurture = true
+  // The old "Do Not Contact" status meant a total opt-out; keep that meaning.
+  if (from === 'dnc') set.doNotContact = true
+  const result = await Contact.updateMany(filter, { $set: set })
+  res.json({ ok: true, moved: result.modifiedCount || 0 })
 })
 
 /* ---- Quote approval rules ---- */
@@ -539,7 +597,9 @@ router.post('/suppressions', requirePermission('suppression.manage'), async (req
     const contacts = await Contact.find({ $or: or }).select('_id').lean()
     affected = contacts.length
     for (const l of contacts) {
-      await Contact.updateOne({ _id: l._id }, { $set: { doNotContact: true, status: 'dnc' } })
+      const doc = await Contact.findById(l._id)
+      doc.doNotContact = true
+      await markLost(doc, { reason: REASON_UNSUBSCRIBED })
       await suppressContactEverywhere({
         contactId: l._id,
         reason: 'Added to do-not-contact list',

@@ -1,4 +1,5 @@
 const { Suppression, Settings } = require('../db')
+const { emailBlock } = require('./lifecycle')
 
 /* Every outbound email passes through here. There is deliberately no way to
  * bypass it from a route — suppression is checked when a message is queued
@@ -12,10 +13,9 @@ function domainOf(email) {
 
 // Returns a reason string when the contact must not be emailed, else null.
 async function suppressionReason(contact) {
-  if (!contact) return 'Contact not found'
-  if (contact.status === 'dnc') return 'Contact status is Do Not Contact'
-  if (contact.doNotContact) return 'Contact is flagged Do Not Contact'
-  if (contact.unsubscribedAt) return 'Contact unsubscribed'
+  // Email-only rules: an unsubscribe or bounce stops email, not calls.
+  const blocked = emailBlock(contact)
+  if (blocked) return blocked
   if (!contact.email) return 'Contact has no email address'
 
   const domain = domainOf(contact.email)

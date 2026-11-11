@@ -1,4 +1,12 @@
 const express = require('express')
+const { roleStatus } = require('../lib/lifecycle')
+
+/* Status values that mean "meeting booked" in the timeline: the current one,
+ * plus the original key so older history still counts. */
+async function meetingStatuses() {
+  const current = await roleStatus('meeting_booked')
+  return [...new Set([current, 'meeting_booked'].filter(Boolean))]
+}
 const mongoose = require('mongoose')
 const {
   Activity, Enrollment, Campaign, Contact, Deal, Task, OutboxMessage, User, Settings, CALL_OUTCOMES,
@@ -195,7 +203,7 @@ router.get('/channels', async (req, res) => {
   const bookings = await Activity.find({
     ...withContactScope({ createdAt: { $gte: from, $lte: to } }, contactIds),
     type: { $in: ['status_change', 'call_logged'] },
-    $or: [{ 'meta.to': 'meeting_booked' }, { outcome: 'meeting_booked' }],
+    $or: [{ 'meta.to': { $in: await meetingStatuses() } }, { outcome: 'meeting_booked' }],
   })
     .select('contact createdAt channel outcome')
     .lean()
@@ -285,7 +293,7 @@ router.get('/reps', async (req, res) => {
       $match: {
         createdAt: { $gte: from, $lte: to },
         ...userFilter,
-        $or: [{ 'meta.to': 'meeting_booked' }, { outcome: 'meeting_booked' }],
+        $or: [{ 'meta.to': { $in: await meetingStatuses() } }, { outcome: 'meeting_booked' }],
       },
     },
     { $group: { _id: '$user', contacts: { $addToSet: '$contact' } } },
@@ -415,7 +423,7 @@ router.get('/scoreboard', async (req, res) => {
           type: '$type',
         },
         n: { $sum: 1 },
-        booked: { $sum: { $cond: [{ $eq: ['$meta.to', 'meeting_booked'] }, 1, 0] } },
+        booked: { $sum: { $cond: [{ $in: ['$meta.to', await meetingStatuses()] }, 1, 0] } },
         won: { $sum: { $cond: [{ $eq: ['$meta.to', 'won'] }, 1, 0] } },
       },
     },
@@ -689,7 +697,7 @@ router.get('/summary', async (req, res) => {
       withContactScope(
         {
           createdAt: { $gte: from, $lte: to },
-          $or: [{ 'meta.to': 'meeting_booked' }, { outcome: 'meeting_booked' }],
+          $or: [{ 'meta.to': { $in: await meetingStatuses() } }, { outcome: 'meeting_booked' }],
         },
         contactIds
       )

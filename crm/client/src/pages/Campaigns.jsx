@@ -120,7 +120,7 @@ export default function Campaigns() {
                     </h2>
                     <div className="small faint truncate">{c.description || `${c.stages.length} stages`}</div>
                   </div>
-                  {!c.active && <span className="tag">Inactive</span>}
+                  {!c.active && <span className="tag" title="Paused: nobody moves on and its tasks are hidden until it is switched back on">Paused</span>}
                 </div>
                 <div className="card-body">
                   <div className="row wrap" style={{ marginBottom: 12, gap: 5 }}>

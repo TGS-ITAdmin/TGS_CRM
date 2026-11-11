@@ -38,6 +38,8 @@ const CALL_OUTCOMES = [
   { value: 'not_interested', label: 'Not Interested' },
   { value: 'callback_requested', label: 'Callback Requested', positive: true },
   { value: 'meeting_booked', label: 'Meeting Booked', positive: true, bookedMeeting: true },
+  // Asked not to be called again: stops calls only (email and LinkedIn may continue elsewhere).
+  { value: 'do_not_call', label: "Don't call again" },
 ]
 
 /* ------------------------------------------------------------------ */
@@ -270,8 +272,19 @@ const contactSchema = new Schema(
     notes: { type: String, default: '' },
     customFields: { type: Object, default: {} },
 
+    // Total opt-out: no email, no calls, no LinkedIn tasks.
     doNotContact: { type: Boolean, default: false, index: true },
     unsubscribedAt: { type: Date, default: null },
+    /* Channel-specific suppression. An unsubscribe stops email only; a
+       do-not-call request stops calls only. */
+    emailStatus: { type: String, enum: ['valid', 'bounced', 'unsubscribed'], default: 'valid', index: true },
+    dncStatus: {
+      type: String, enum: ['clear', 'national_dnc', 'reassigned', 'dnc_request'], default: 'clear', index: true,
+    },
+    // Required whenever the contact is in the Lost status.
+    lostReason: { type: String, default: '' },
+    // Nurture is a flag, not a status: a contact can be Lost and in Nurture.
+    nurture: { type: Boolean, default: false, index: true },
     unsubscribeToken: {
       type: String,
       default: () => crypto.randomBytes(24).toString('hex'),
@@ -307,7 +320,7 @@ contactSchema.set('toObject', { virtuals: true })
 
 // True when this contact must not be emailed, for any reason.
 contactSchema.methods.isSuppressed = function () {
-  return !!(this.doNotContact || this.unsubscribedAt || this.status === 'dnc')
+  return !!(this.doNotContact || this.unsubscribedAt || this.emailStatus === 'unsubscribed' || this.emailStatus === 'bounced')
 }
 
 /* ------------------------------------------------------------------ */
@@ -851,6 +864,9 @@ const ACTIVITY_TYPES = [
   'task_cancelled',
   'unsubscribed',
   'dnc_added',
+  'step_skipped',
+  'suppression_changed',
+  'campaign_paused',
   'reply_logged',
   'deal_created',
   'deal_stage_changed',
@@ -946,6 +962,12 @@ async function connect() {
   if (Object.keys(backfill).length) {
     await Settings.updateOne({ key: 'global' }, { $set: backfill })
     console.log(`[db] backfilled new settings defaults: ${Object.keys(backfill).join(', ')}`)
+  }
+
+  try {
+    await require('./lib/lifecycle').migrateLifecycle({ CustomField })
+  } catch (err) {
+    console.error('[db] lifecycle migration skipped:', err.message)
   }
 
   const email = (process.env.SEED_ADMIN_EMAIL || 'admin@tgsbpo.com').toLowerCase()

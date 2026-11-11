@@ -4,13 +4,14 @@ import { api, getToken } from '../api'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import { useToast } from '../components/Toast.jsx'
 import ContactForm from '../components/ContactForm.jsx'
+import LostReasonDialog from '../components/LostReasonDialog.jsx'
 import CompanyPicker from '../components/CompanyPicker.jsx'
 import SavedViews from '../components/SavedViews.jsx'
 import { Channel, Confirm, Empty, Loading, Modal, Pager, StatusPill } from '../components/ui.jsx'
 import { fullName, relativeDate, num } from '../components/format.js'
 
 export default function Contacts() {
-  const { statuses, statusMap, users, isAdmin, can } = useAuth()
+  const { statuses, statusMap, users, isAdmin, can, statusRoles, emailStatuses, dncStatuses } = useAuth()
   const toast = useToast()
   const [params, setParams] = useSearchParams()
 
@@ -70,9 +71,9 @@ export default function Contacts() {
     })
   }
 
-  async function bulk(action, value, message) {
+  async function bulk(action, value, message, extra = {}) {
     try {
-      const res = await api.bulkContacts({ ids: [...selected], action, value })
+      const res = await api.bulkContacts({ ids: [...selected], action, value, ...extra })
       toast.success(`${message} — ${res.affected} contact${res.affected === 1 ? '' : 's'}`)
       setSelected(new Set())
       setDialog(null)
@@ -180,6 +181,8 @@ export default function Contacts() {
                 </>
               )}
               <button className="btn btn-sm" onClick={() => setDialog('bulk-status')}>Set status</button>
+              <button className="btn btn-sm" onClick={() => setDialog('bulk-email')}>Email status</button>
+              <button className="btn btn-sm" onClick={() => setDialog('bulk-dnc')}>DNC status</button>
               {can('contacts.viewAll') && <button className="btn btn-sm" onClick={() => setDialog('bulk-owner')}>Reassign</button>}
               <button className="btn btn-sm" onClick={() => setDialog('tag')}>Tag</button>
               <button className="btn btn-sm" onClick={() => setDialog('set-company')}>Set company</button>
@@ -347,7 +350,32 @@ export default function Contacts() {
         <PickOne
           title="Set status" options={statuses.map((s) => ({ value: s.value, label: s.label }))}
           onClose={() => setDialog(null)}
-          onConfirm={(v) => bulk('status', v, 'Status updated')}
+          onConfirm={(v) => {
+            // Lost needs a reason for the batch (G17).
+            if (v && v === statusRoles.lost) setDialog({ lostFor: v })
+            else bulk('status', v, 'Status updated')
+          }}
+        />
+      )}
+      {dialog?.lostFor && (
+        <LostReasonDialog
+          count={selected.size}
+          onClose={() => setDialog(null)}
+          onConfirm={({ lostReason, nurture }) => bulk('status', dialog.lostFor, 'Set to Lost', { lostReason, nurture })}
+        />
+      )}
+      {dialog === 'bulk-email' && (
+        <PickOne
+          title="Set email status" options={emailStatuses}
+          onClose={() => setDialog(null)}
+          onConfirm={(v) => bulk('emailStatus', v, 'Email status updated')}
+        />
+      )}
+      {dialog === 'bulk-dnc' && (
+        <PickOne
+          title="Set DNC status" options={dncStatuses}
+          onClose={() => setDialog(null)}
+          onConfirm={(v) => bulk('dncStatus', v, 'DNC status updated')}
         />
       )}
       {dialog === 'bulk-owner' && (

@@ -87,6 +87,11 @@ export function AuthProvider({ children }) {
         brandColor: boot?.settings?.brandColor || '#2563eb',
         pricingModels: boot?.pricingModels || [],
         lostReasons: boot?.settings?.lostReasons || [],
+        // Status values the CRM sets on its own (e.g. statusRoles.lost).
+        statusRoles: boot?.statusRoles || {},
+        statusRoleCatalogue: boot?.statusRoleCatalogue || [],
+        emailStatuses: boot?.emailStatuses || [],
+        dncStatuses: boot?.dncStatuses || [],
         users: boot?.users || [],
         callOutcomes: boot?.callOutcomes || [],
         mergeFields: boot?.mergeFields || [],

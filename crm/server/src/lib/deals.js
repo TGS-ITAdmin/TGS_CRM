@@ -1,6 +1,7 @@
 const { Deal, Contact, Company, Settings, DEFAULT_DEAL_STAGES } = require('../db')
 const { recalcDeal, getSettings } = require('./money')
 const { logActivity } = require('./engine')
+const { roleStatus, markLost } = require('./lifecycle')
 
 /* Deal lifecycle. Stage, probability and status are kept in step here and
  * nowhere else — a deal whose stage says Won but whose status says open is
@@ -85,22 +86,43 @@ async function changeStage({ deal, stageKey, actorId, lostReason, closedNotes })
     meta: { from: deal.stage, to: stage.key, probability: deal.probability },
   })
 
-  // Winning makes the people involved customers. Their lifecycle no longer
-  // carries Won at all, so this is the only place that mark gets made.
-  if (stage.type === 'won') {
+  /* Deal outcome → contact lifecycle.
+     Won: the people on it move to the status set to "A deal is won" (Pilot
+     Signed). "Client (retained)" is a later step, not set here.
+     Lost: they become Lost with the deal's reason, and Nurture on — unless
+     they still have another open or won deal. */
+  if (stage.type === 'won' || stage.type === 'lost') {
     const ids = [deal.primaryContact, ...(deal.contacts || [])].filter(Boolean)
-    if (ids.length) {
-      await Contact.updateMany({ _id: { $in: ids } }, { $set: { status: 'customer' } })
-      for (const id of ids) {
-        await logActivity({
-          contact: id,
-          company: deal.company,
-          type: 'status_change',
-          user: actorId,
-          title: `Status set to Customer — "${deal.name}" was won`,
-          meta: { to: 'customer', automatic: true, deal: deal._id },
+    const target = await roleStatus(stage.type === 'won' ? 'won' : 'lost')
+    for (const id of ids) {
+      const contact = await Contact.findById(id)
+      if (!contact) continue
+      let change = null
+      if (stage.type === 'won') {
+        if (!target || contact.status === target) continue
+        change = { from: contact.status, to: target }
+        contact.status = target
+        await contact.save()
+      } else {
+        const others = await Deal.countDocuments({
+          _id: { $ne: deal._id },
+          status: { $in: ['open', 'won'] },
+          $or: [{ primaryContact: id }, { contacts: id }],
         })
+        if (others) continue
+        change = await markLost(contact, { reason: deal.lostReason || lostReason || 'Not interested', nurture: true })
+        if (!change) continue
       }
+      await logActivity({
+        contact: id,
+        company: deal.company,
+        type: 'status_change',
+        user: actorId,
+        title: stage.type === 'won'
+          ? `Status: ${change.from} → ${change.to} — "${deal.name}" was won`
+          : `Status: ${change.from} → ${change.to} — "${deal.name}" was lost (${contact.lostReason})`,
+        meta: { ...change, automatic: true, deal: deal._id },
+      })
     }
   }
 

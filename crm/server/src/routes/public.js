@@ -2,6 +2,7 @@ const express = require('express')
 const rateLimit = require('express-rate-limit')
 const { Contact, Settings, Suppression, User, Quote, Company, Deal } = require('../db')
 const { logActivity, suppressContactEverywhere } = require('../lib/engine')
+const { markLost, roleStatus, REASON_UNSUBSCRIBED } = require('../lib/lifecycle')
 const { resolveCompany } = require('../lib/companies')
 const { applyAcceptedQuoteToDeal } = require('../lib/quotes')
 const { renderQuotePdf } = require('../lib/quote-pdf')
@@ -66,10 +67,20 @@ router.post('/u/:token', async (req, res) => {
   if (!contact) return res.status(404).send(page('Link not found', '<h1>That link is no longer valid</h1>'))
 
   if (!contact.unsubscribedAt) {
+    /* An unsubscribe stops email, for good. It is not a do-not-call request,
+       so calls are not blocked. The contact becomes Lost with the
+       unsubscribe reason, and every campaign they are in ends. */
     contact.unsubscribedAt = new Date()
-    contact.doNotContact = true
-    contact.status = 'dnc'
-    await contact.save()
+    contact.emailStatus = 'unsubscribed'
+    const lostChange = await markLost(contact, { reason: REASON_UNSUBSCRIBED })
+    if (lostChange) {
+      await logActivity({
+        contact: contact._id,
+        type: 'status_change',
+        title: `Status: ${lostChange.from} → ${lostChange.to} (${REASON_UNSUBSCRIBED})`,
+        meta: { ...lostChange, automatic: true },
+      })
+    }
 
     if (contact.email) {
       await Suppression.updateOne(
@@ -94,7 +105,7 @@ router.post('/u/:token', async (req, res) => {
     return res.status(200).send('OK')
   }
   res.send(page('Unsubscribed', `<h1>Done — you are opted out</h1>
-    <p>${escapeHtml(contact.email)} has been removed from all ${escapeHtml(settings?.companyName || 'our')} outreach.</p>`))
+    <p>${escapeHtml(contact.email)} will not receive any more emails from ${escapeHtml(settings?.companyName || 'us')}.</p>`))
 })
 
 /* ---- Public inbound web form ---- */
@@ -164,6 +175,7 @@ router.post('/api/public/contacts', formLimiter, async (req, res) => {
     source: 'web_form',
   })
 
+  const createdStatus = await roleStatus('created')
   const contact = await Contact.create({
     firstName: String(firstName || '').slice(0, 120),
     lastName: String(lastName || '').slice(0, 120),
@@ -174,7 +186,7 @@ router.post('/api/public/contacts', formLimiter, async (req, res) => {
     title: String(title || '').slice(0, 200),
     notes: String(message || '').slice(0, 4000),
     source: 'web_form',
-    status: 'new',
+    ...(createdStatus ? { status: createdStatus } : {}),
     owner,
   })
 

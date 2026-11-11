@@ -6,6 +6,7 @@ import { CustomFieldValue } from '../components/CustomFieldInput.jsx'
 import { useToast } from '../components/Toast.jsx'
 import ContactForm from '../components/ContactForm.jsx'
 import WorkItem from '../components/WorkItem.jsx'
+import LostReasonDialog from '../components/LostReasonDialog.jsx'
 import { Channel, Confirm, CopyButton, Empty, Loading, Modal, StatusPill } from '../components/ui.jsx'
 import { dateTime, fullName, relativeDate } from '../components/format.js'
 
@@ -28,12 +29,14 @@ function Row({ label, children }) {
 export default function ContactDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
-  const { statusMap, statuses, isAdmin, can } = useAuth()
+  const { statusMap, statuses, isAdmin, can, statusRoles, emailStatuses, dncStatuses } = useAuth()
   const toast = useToast()
 
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [dialog, setDialog] = useState(null)
+  // Status waiting on a Lost reason before it is saved.
+  const [pendingLost, setPendingLost] = useState(null)
   const [note, setNote] = useState('')
   const [noteType, setNoteType] = useState('note')
   const [noteChannel, setNoteChannel] = useState('')
@@ -96,7 +99,12 @@ export default function ContactDetail() {
         <StatusPill value={contact.status} statusMap={statusMap} />
         <select
           className="select" style={{ maxWidth: 160 }} value={contact.status}
-          onChange={(e) => act(() => api.updateContact(contact._id, { status: e.target.value }), 'Status updated')}
+          onChange={(e) => {
+            const status = e.target.value
+            // Lost needs a reason first (G17).
+            if (status && status === statusRoles.lost) setPendingLost(status)
+            else act(() => api.updateContact(contact._id, { status }), 'Status updated')
+          }}
         >
           {statuses.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
         </select>
@@ -107,14 +115,44 @@ export default function ContactDetail() {
       </div>
 
       <div className="page">
+        {(contact.status === statusRoles.lost || contact.nurture) && (
+          <div className="banner banner-info">
+            <span>ℹ</span>
+            <div>
+              {contact.status === statusRoles.lost && (
+                <><strong>Lost</strong>{contact.lostReason ? ` — ${contact.lostReason}` : ''}. </>
+              )}
+              {contact.nurture && <><strong>Nurture is on</strong> — kept on the monthly nurture emails.</>}
+            </div>
+          </div>
+        )}
+        {!contact.doNotContact && (contact.emailStatus && contact.emailStatus !== 'valid') && (
+          <div className="banner banner-warn">
+            <span>✉</span>
+            <div>
+              <strong>No email:</strong>{' '}
+              {contact.emailStatus === 'bounced'
+                ? 'this address bounced. Email steps are skipped; calls and LinkedIn carry on.'
+                : `unsubscribed${contact.unsubscribedAt ? ` on ${dateTime(contact.unsubscribedAt)}` : ''}. Email steps are skipped; calls are still allowed unless DNC status says otherwise.`}
+            </div>
+          </div>
+        )}
+        {!contact.doNotContact && contact.dncStatus && contact.dncStatus !== 'clear' && (
+          <div className="banner banner-warn">
+            <span>☎</span>
+            <div>
+              <strong>No calls:</strong>{' '}
+              {(dncStatuses.find((d) => d.value === contact.dncStatus) || {}).label || contact.dncStatus}.
+              Call steps are skipped; email and LinkedIn carry on unless Email status says otherwise.
+            </div>
+          </div>
+        )}
         {contact.doNotContact && (
           <div className="banner banner-danger">
             <span>⛔</span>
             <div>
               <strong>Do not contact.</strong>{' '}
-              {contact.unsubscribedAt
-                ? `This person unsubscribed on ${dateTime(contact.unsubscribedAt)}. Emailing them again would be a compliance breach.`
-                : 'This contact is suppressed. No email will be queued or sent for them.'}
+              This contact is fully suppressed: no emails, calls or LinkedIn tasks are created for them.
             </div>
           </div>
         )}
@@ -392,7 +430,30 @@ export default function ContactDetail() {
             )}
 
             <div className="card">
+              <div className="card-head"><h2>Outreach permissions</h2></div>
               <div className="card-body">
+                <div className="field">
+                  <label className="label">Email status</label>
+                  <select className="select" value={contact.emailStatus || 'valid'}
+                    onChange={(e) => act(() => api.updateContact(contact._id, { emailStatus: e.target.value }), 'Email status updated')}>
+                    {emailStatuses.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                  <div className="hint">Unsubscribed stops emails only, and sets the contact to Lost.</div>
+                </div>
+                <div className="field">
+                  <label className="label">DNC status</label>
+                  <select className="select" value={contact.dncStatus || 'clear'}
+                    onChange={(e) => act(() => api.updateContact(contact._id, { dncStatus: e.target.value }), 'DNC status updated')}>
+                    {dncStatuses.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                  <div className="hint">Anything but Clear stops calls only. A do-not-call request also sets the contact to Lost.</div>
+                </div>
+                <label className="row small" style={{ gap: 8, marginBottom: 14, cursor: 'pointer' }}>
+                  <input type="checkbox" className="checkbox" checked={!!contact.nurture}
+                    onChange={(e) => act(() => api.updateContact(contact._id, { nurture: e.target.checked }),
+                      e.target.checked ? 'Nurture on' : 'Nurture off')} />
+                  Nurture (monthly nurture emails)
+                </label>
                 <button
                   className="btn btn-block btn-sm"
                   onClick={() =>
@@ -402,7 +463,7 @@ export default function ContactDetail() {
                     )
                   }
                 >
-                  {contact.doNotContact ? 'Clear do-not-contact flag' : 'Flag do not contact'}
+                  {contact.doNotContact ? 'Clear do-not-contact flag' : 'Flag do not contact (stops everything)'}
                 </button>
                 {contact.doNotContact && (
                   <div className="hint">
@@ -441,6 +502,19 @@ export default function ContactDetail() {
           mode={dialog} campaigns={campaigns} contactId={contact._id}
           onClose={() => setDialog(null)}
           onDone={(msg) => { toast.success(msg); setDialog(null); load() }}
+        />
+      )}
+
+      {pendingLost && (
+        <LostReasonDialog
+          initialReason={contact.lostReason} initialNurture={contact.nurture}
+          onClose={() => setPendingLost(null)}
+          onConfirm={async ({ lostReason, nurture }) => {
+            await api.updateContact(contact._id, { status: pendingLost, lostReason, nurture })
+            toast.success('Set to Lost')
+            setPendingLost(null)
+            load()
+          }}
         />
       )}
 

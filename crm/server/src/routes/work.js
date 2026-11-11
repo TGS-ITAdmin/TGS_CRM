@@ -1,11 +1,12 @@
 const express = require('express')
 const {
-  Task, OutboxMessage, Contact, Enrollment, Quote, Activity, CALL_OUTCOMES,
+  Task, OutboxMessage, Contact, Enrollment, Quote, Activity, Campaign, CALL_OUTCOMES,
 } = require('../db')
 const { requireAuth, assignedScope, ownerScope } = require('../middleware/auth')
 const { logActivity, advance, suppressContactEverywhere } = require('../lib/engine')
 const { sendMessage } = require('../lib/mailer')
 const { suppressionReason } = require('../lib/compliance')
+const { advanceStatus, markLost, REASON_NOT_INTERESTED, REASON_UNSUBSCRIBED } = require('../lib/lifecycle')
 const { ensureDealForMeeting } = require('../lib/deals')
 const { startOfDay, endOfDay } = require('../lib/time')
 
@@ -13,8 +14,15 @@ const router = express.Router()
 router.use(requireAuth)
 
 const outcomeMap = new Map(CALL_OUTCOMES.map((o) => [o.value, o]))
+
+/* Open work from a paused (inactive) campaign stays out of the queues until
+ * the campaign is switched back on. Work with no campaign is unaffected. */
+async function notPaused() {
+  const paused = await Campaign.find({ active: false }).distinct('_id')
+  return paused.length ? { campaign: { $nin: paused } } : {}
+}
 const CONTACT_FIELDS =
-  'firstName lastName company companyName title email phone mobile linkedinUrl status timezone location owner doNotContact unsubscribedAt'
+  'firstName lastName company companyName title email phone mobile linkedinUrl status timezone location owner doNotContact unsubscribedAt emailStatus dncStatus nurture lostReason'
 // Nested populate: the work queue shows the company name, and the merge
 // preview on a task needs the company's own fields.
 const CONTACT_POPULATE = { path: 'contact', select: CONTACT_FIELDS, populate: { path: 'company', select: 'name domain industry seatsNeeded timezone' } }
@@ -28,9 +36,10 @@ router.get('/my-day', async (req, res) => {
   const dayEnd = endOfDay(tz)
   const weekEnd = endOfDay(tz, 7)
   const scope = assignedScope(req)
+  const live = await notPaused()
 
-  const overdueFilter = { ...scope, status: 'pending', dueAt: { $lt: dayStart } }
-  const todayFilter = { ...scope, status: 'pending', dueAt: { $gte: dayStart, $lt: dayEnd } }
+  const overdueFilter = { ...scope, ...live, status: 'pending', dueAt: { $lt: dayStart } }
+  const todayFilter = { ...scope, ...live, status: 'pending', dueAt: { $gte: dayStart, $lt: dayEnd } }
 
   const [overdueTasks, todayTasks, upcomingTasks, queuedEmails, counts] = await Promise.all([
     Task.find(overdueFilter)
@@ -39,16 +48,16 @@ router.get('/my-day', async (req, res) => {
     Task.find(todayFilter)
       .sort({ dueAt: 1 }).limit(100)
       .populate(CONTACT_POPULATE).populate('campaign', 'name').lean(),
-    Task.find({ ...scope, status: 'pending', dueAt: { $gte: dayEnd, $lt: weekEnd } })
+    Task.find({ ...scope, ...live, status: 'pending', dueAt: { $gte: dayEnd, $lt: weekEnd } })
       .sort({ dueAt: 1 }).limit(50)
       .populate(CONTACT_POPULATE).populate('campaign', 'name').lean(),
-    OutboxMessage.find({ ...scope, status: 'queued' })
+    OutboxMessage.find({ ...scope, ...live, status: 'queued' })
       .sort({ createdAt: 1 }).limit(100)
       .populate(CONTACT_POPULATE).populate('campaign', 'name').lean(),
     Promise.all([
       Task.countDocuments(overdueFilter),
       Task.countDocuments(todayFilter),
-      OutboxMessage.countDocuments({ ...scope, status: 'queued' }),
+      OutboxMessage.countDocuments({ ...scope, ...live, status: 'queued' }),
       Task.countDocuments({ ...scope, status: 'done', completedAt: { $gte: dayStart } }),
       // Quotes stuck behind an approval are blocked work, so they belong in
       // the same badge count as everything else waiting on someone.
@@ -81,6 +90,7 @@ router.get('/tasks', async (req, res) => {
   const filter = { ...assignedScope(req) }
   if (req.query.status) filter.status = req.query.status
   else filter.status = 'pending'
+  if (filter.status === 'pending' && !req.query.campaign) Object.assign(filter, await notPaused())
   if (req.query.channel) filter.channel = req.query.channel
   if (req.query.campaign) filter.campaign = req.query.campaign
   if (req.query.assignedTo && req.can('contacts.viewAll')) filter.assignedTo = req.query.assignedTo
@@ -95,7 +105,7 @@ router.get('/tasks', async (req, res) => {
 
 /* ---- Call list: timezone-aware, sorted by who is reachable now ---- */
 router.get('/call-list', async (req, res) => {
-  const filter = { ...assignedScope(req), status: 'pending', channel: 'call' }
+  const filter = { ...assignedScope(req), status: 'pending', channel: 'call', ...(await notPaused()) }
   if (req.query.campaign) filter.campaign = req.query.campaign
 
   const tasks = await Task.find(filter)
@@ -177,23 +187,53 @@ router.post('/tasks/:id/complete', async (req, res) => {
     })
 
     contact.lastContactedAt = new Date()
-    if (contact.status === 'new') contact.status = 'contacted'
+    const statusChanges = []
+    // The first outreach done moves a new contact to the "contacted" status.
+    const touched = await advanceStatus(contact, 'contacted', { from: ['created'] })
+    if (touched) statusChanges.push({ ...touched, why: 'first outreach' })
 
     const meta = outcomeMap.get(outcome)
-    if (meta?.bookedMeeting) contact.status = 'meeting_booked'
-    // "Lost" is a deal outcome now, not a contact lifecycle. Someone who is
-    // not interested today is a nurture candidate, not a dead record.
-    else if (outcome === 'not_interested') contact.status = 'nurture'
-    else if (outcome === 'wrong_number' || outcome === 'callback_requested') {
-      if (contact.status === 'new') contact.status = 'contacted'
+    if (meta?.bookedMeeting) {
+      const booked = await advanceStatus(contact, 'meeting_booked')
+      if (booked) statusChanges.push({ ...booked, why: 'meeting booked' })
     }
     await contact.save()
 
+    /* Not interested: Lost with that reason, and Nurture on. Their current
+       campaigns end, but they are NOT suppressed — the monthly nurture emails
+       still reach them. */
     if (outcome === 'not_interested') {
+      const lost = await markLost(contact, { reason: REASON_NOT_INTERESTED, nurture: true })
+      if (lost) statusChanges.push({ ...lost, why: REASON_NOT_INTERESTED })
       await suppressContactEverywhere({
         contactId: contact._id,
-        reason: 'Marked not interested on a call',
+        reason: 'Not interested (call)',
         actorId: req.user._id,
+      })
+    }
+
+    /* "Don't call again": a do-not-call request. Calls stop for good; the
+       contact is Lost (Unsubscribed / do-not-contact) and their campaigns end. */
+    if (outcome === 'do_not_call') {
+      contact.dncStatus = 'dnc_request'
+      const lost = await markLost(contact, { reason: REASON_UNSUBSCRIBED })
+      if (lost) statusChanges.push({ ...lost, why: 'do-not-call request' })
+      await suppressContactEverywhere({
+        contactId: contact._id,
+        reason: 'Do-not-call request',
+        actorId: req.user._id,
+      })
+      await logActivity({
+        contact: contact._id, type: 'suppression_changed', channel: 'call', user: req.user._id,
+        title: 'Do-not-call request — calls stopped',
+      })
+    }
+
+    for (const ch of statusChanges) {
+      await logActivity({
+        contact: contact._id, type: 'status_change', user: req.user._id,
+        title: `Status: ${ch.from} → ${ch.to} (${ch.why})`,
+        meta: { from: ch.from, to: ch.to, automatic: true },
       })
     }
 
@@ -282,6 +322,7 @@ router.get('/outbox', async (req, res) => {
   const limit = Math.min(200, parseInt(req.query.limit, 10) || 50)
   const filter = { ...assignedScope(req) }
   filter.status = req.query.status || 'queued'
+  if (filter.status === 'queued') Object.assign(filter, await notPaused())
   if (req.query.campaign) filter.campaign = req.query.campaign
 
   const [items, total] = await Promise.all([
@@ -336,7 +377,7 @@ async function deliver(msg, user) {
     })
 
     contact.lastContactedAt = new Date()
-    if (contact.status === 'new') contact.status = 'contacted'
+    await advanceStatus(contact, 'contacted', { from: ['created'] })
     await contact.save()
     return { ok: true }
   }

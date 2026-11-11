@@ -7,6 +7,10 @@ const {
 } = require('../db')
 const { requireAuth, requirePermission, ownerScope } = require('../middleware/auth')
 const { logActivity, suppressContactEverywhere } = require('../lib/engine')
+const {
+  roleStatus, isLostStatus, applyLost, advanceStatus, statusList, statusForRole,
+  REASON_UNSUBSCRIBED, EMAIL_STATUSES, DNC_STATUSES,
+} = require('../lib/lifecycle')
 const { resolveCompany, domainFromEmail, domainFromWebsite } = require('../lib/companies')
 const customFields = require('../lib/custom-fields')
 const { findContactDuplicates, mergeContacts, previewContactMerge } = require('../lib/dedupe')
@@ -26,6 +30,102 @@ const EDITABLE = [
   'firstName', 'lastName', 'title', 'email', 'phone', 'mobile',
   'linkedinUrl', 'location', 'timezone', 'source', 'notes', 'tags',
 ]
+
+const EMAIL_STATUS_VALUES = EMAIL_STATUSES.map((s) => s.value)
+const DNC_STATUS_VALUES = DNC_STATUSES.map((s) => s.value)
+
+const lostReasonRequired = (res) => res.status(400).json({
+  error: 'A Lost reason is required when a contact is set to Lost.',
+  code: 'lost_reason_required',
+})
+
+/* Stop one channel's pending work for a contact: queued emails, or open
+ * call tasks. Used when an email or call status blocks that channel. */
+async function cancelChannelWork(contactId, channel, reason) {
+  if (channel === 'email') {
+    const r = await OutboxMessage.updateMany(
+      { contact: contactId, status: 'queued' },
+      { $set: { status: 'cancelled', error: reason } }
+    )
+    return r.modifiedCount || 0
+  }
+  const r = await Task.updateMany(
+    { contact: contactId, status: 'pending', channel },
+    { $set: { status: 'cancelled', notes: reason } }
+  )
+  return r.modifiedCount || 0
+}
+
+/* Apply emailStatus / dncStatus / doNotContact changes from a form or bulk
+ * edit. Returns notes for the timeline. The contact is not saved here.
+ *  - Unsubscribed (email) or a do-not-call request: Lost with reason
+ *    "Unsubscribed / do-not-contact", and their campaigns end.
+ *  - Bounced: queued emails cancelled; the campaign carries on.
+ *  - On National DNC / reassigned: open call tasks cancelled; email and
+ *    LinkedIn carry on. */
+async function applySuppressionChanges(contact, body, actorId) {
+  const notes = []
+  let endCampaigns = null
+
+  if (body.emailStatus !== undefined && EMAIL_STATUS_VALUES.includes(body.emailStatus)
+      && body.emailStatus !== (contact.emailStatus || 'valid')) {
+    contact.emailStatus = body.emailStatus
+    if (body.emailStatus === 'unsubscribed') {
+      contact.unsubscribedAt = contact.unsubscribedAt || new Date()
+      await cancelChannelWork(contact._id, 'email', 'Unsubscribed')
+      endCampaigns = 'Unsubscribed from email'
+      notes.push('Email status: Unsubscribed — emails stopped')
+    } else if (body.emailStatus === 'bounced') {
+      await cancelChannelWork(contact._id, 'email', 'Email bounced')
+      notes.push('Email status: Bounced — queued emails cancelled')
+    } else {
+      contact.unsubscribedAt = null
+      notes.push('Email status: Valid')
+    }
+  }
+
+  if (body.dncStatus !== undefined && DNC_STATUS_VALUES.includes(body.dncStatus)
+      && body.dncStatus !== (contact.dncStatus || 'clear')) {
+    contact.dncStatus = body.dncStatus
+    const label = DNC_STATUSES.find((d) => d.value === body.dncStatus).label
+    if (body.dncStatus === 'clear') {
+      notes.push('DNC status: Clear')
+    } else {
+      await cancelChannelWork(contact._id, 'call', `Calls blocked: ${label}`)
+      notes.push(`DNC status: ${label} — calls stopped`)
+      if (body.dncStatus === 'dnc_request') endCampaigns = 'Do-not-call request'
+    }
+  }
+
+  if (body.doNotContact !== undefined && !!body.doNotContact !== !!contact.doNotContact) {
+    contact.doNotContact = !!body.doNotContact
+    if (contact.doNotContact) {
+      await Suppression.updateOne(
+        { email: contact.email || '', linkedinUrl: contact.linkedinUrl || '' },
+        {
+          $set: {
+            email: contact.email || '',
+            linkedinUrl: contact.linkedinUrl || '',
+            reason: 'flagged on contact',
+            addedBy: actorId,
+          },
+        },
+        { upsert: true }
+      )
+      endCampaigns = 'Flagged do-not-contact'
+      notes.push('Flagged do not contact — all outreach stopped')
+    } else {
+      notes.push('Do-not-contact flag removed')
+    }
+  }
+
+  let lostChange = null
+  if (endCampaigns) {
+    lostChange = await applyLost(contact, { reason: REASON_UNSUBSCRIBED })
+    await suppressContactEverywhere({ contactId: contact._id, reason: endCampaigns, actorId })
+  }
+  return { notes, lostChange }
+}
 
 // Company-level fields a contact form or CSV may also carry.
 const COMPANY_FIELDS = [
@@ -51,6 +151,10 @@ router.get('/', async (req, res) => {
   if (req.query.company) filter.company = req.query.company
   if (req.query.dnc === 'true') filter.doNotContact = true
   if (req.query.dnc === 'false') filter.doNotContact = false
+  if (req.query.nurture === 'true') filter.nurture = true
+  if (req.query.nurture === 'false') filter.nurture = { $ne: true }
+  if (EMAIL_STATUS_VALUES.includes(req.query.emailStatus)) filter.emailStatus = req.query.emailStatus
+  if (DNC_STATUS_VALUES.includes(req.query.dncStatus)) filter.dncStatus = req.query.dncStatus
 
   const q = (req.query.q || '').trim()
   if (q) {
@@ -218,7 +322,13 @@ router.post('/', requirePermission('contacts.edit'), async (req, res) => {
   const body = req.body || {}
   const doc = {}
   for (const key of EDITABLE) if (body[key] !== undefined) doc[key] = body[key]
-  if (body.status) doc.status = body.status
+  doc.status = body.status || (await roleStatus('created')) || 'new'
+  if (body.lostReason !== undefined) doc.lostReason = String(body.lostReason || '').trim()
+  if (body.nurture !== undefined) doc.nurture = !!body.nurture
+  if (EMAIL_STATUS_VALUES.includes(body.emailStatus)) doc.emailStatus = body.emailStatus
+  if (DNC_STATUS_VALUES.includes(body.dncStatus)) doc.dncStatus = body.dncStatus
+  if (doc.emailStatus === 'unsubscribed') doc.unsubscribedAt = new Date()
+  if (await isLostStatus(doc.status) && !doc.lostReason) return lostReasonRequired(res)
   if (body.customFields) {
     const { values, errors } = await customFields.applyValues('contact', {}, body.customFields)
     if (errors.length) return res.status(400).json({ error: errors.join('. ') })
@@ -273,6 +383,22 @@ router.put('/:id', requirePermission('contacts.edit'), async (req, res) => {
   const body = req.body || {}
   const changes = []
   let dealResult = null
+
+  // G17: Lost needs a reason — checked before anything is changed.
+  const nextStatus = body.status !== undefined ? body.status : contact.status
+  const nextReason = body.lostReason !== undefined ? String(body.lostReason || '').trim() : contact.lostReason
+  const willBeLost = await isLostStatus(nextStatus)
+  if (willBeLost && !nextReason) return lostReasonRequired(res)
+
+  if (body.lostReason !== undefined && nextReason !== (contact.lostReason || '')) {
+    contact.lostReason = nextReason
+    changes.push('lost reason')
+  }
+  if (body.nurture !== undefined && !!body.nurture !== !!contact.nurture) {
+    contact.nurture = !!body.nurture
+    changes.push(contact.nurture ? 'nurture on' : 'nurture off')
+  }
+
   for (const key of EDITABLE) {
     if (body[key] !== undefined && String(contact[key] ?? '') !== String(body[key] ?? '')) {
       contact[key] = body[key]
@@ -295,24 +421,18 @@ router.put('/:id', requirePermission('contacts.edit'), async (req, res) => {
   if (body.status !== undefined && body.status !== contact.status) {
     const from = contact.status
     contact.status = body.status
-    if (body.status === 'dnc') {
-      contact.doNotContact = true
-      await suppressContactEverywhere({
-        contactId: contact._id,
-        reason: 'Status set to Do Not Contact',
-        actorId: req.user._id,
-      })
-    }
+    // Leaving Lost clears the reason; it described a Lost that no longer applies.
+    if (!willBeLost && await isLostStatus(from) && body.lostReason === undefined) contact.lostReason = ''
     await logActivity({
       contact: contact._id,
       company: contact.company || null,
       type: 'status_change',
       user: req.user._id,
-      title: `Status: ${from} → ${body.status}`,
+      title: `Status: ${from} → ${body.status}${willBeLost && contact.lostReason ? ` (${contact.lostReason})` : ''}`,
       meta: { from, to: body.status },
     })
     // Same handoff as a booked-meeting call outcome, for a manual status change.
-    if (body.status === 'meeting_booked') {
+    if (body.status === (await roleStatus('meeting_booked'))) {
       dealResult = await ensureDealForMeeting({ contact, actorId: req.user._id })
     }
   }
@@ -327,31 +447,19 @@ router.put('/:id', requirePermission('contacts.edit'), async (req, res) => {
     })
   }
 
-  if (body.doNotContact !== undefined && !!body.doNotContact !== contact.doNotContact) {
-    contact.doNotContact = !!body.doNotContact
-    if (contact.doNotContact) {
-      await Suppression.updateOne(
-        { email: contact.email || '', linkedinUrl: contact.linkedinUrl || '' },
-        {
-          $set: {
-            email: contact.email || '',
-            linkedinUrl: contact.linkedinUrl || '',
-            reason: 'flagged on contact',
-            addedBy: req.user._id,
-          },
-        },
-        { upsert: true }
-      )
-      await suppressContactEverywhere({
-        contactId: contact._id,
-        reason: 'Flagged do-not-contact',
-        actorId: req.user._id,
-      })
-      await logActivity({
-        contact: contact._id, company: contact.company || null,
-        type: 'dnc_added', user: req.user._id, title: 'Flagged do-not-contact',
-      })
-    }
+  const suppression = await applySuppressionChanges(contact, body, req.user._id)
+  if (suppression.lostChange) {
+    await logActivity({
+      contact: contact._id, company: contact.company || null, type: 'status_change', user: req.user._id,
+      title: `Status: ${suppression.lostChange.from} → ${suppression.lostChange.to} (${REASON_UNSUBSCRIBED})`,
+      meta: { ...suppression.lostChange, automatic: true },
+    })
+  }
+  for (const note of suppression.notes) {
+    await logActivity({
+      contact: contact._id, company: contact.company || null,
+      type: note.startsWith('Flagged') ? 'dnc_added' : 'suppression_changed', user: req.user._id, title: note,
+    })
   }
 
   const dupe = await findDuplicate(contact, contact._id)
@@ -400,16 +508,18 @@ router.post('/:id/notes', async (req, res) => {
   })
 
   // A logged reply is the signal the channel report hangs on, so nudge the
-  // lifecycle forward if the contact is still sitting at Contacted.
-  if (type === 'reply_logged' && ['new', 'contacted'].includes(contact.status)) {
-    contact.status = 'engaged'
-    await contact.save()
-    await logActivity({
-      contact: contact._id, company: contact.company || null,
-      type: 'status_change', user: req.user._id,
-      title: 'Status: contacted → engaged (reply logged)',
-      meta: { from: 'contacted', to: 'engaged', automatic: true },
-    })
+  // lifecycle forward if the contact is still at New or Contacted.
+  if (type === 'reply_logged') {
+    const moved = await advanceStatus(contact, 'replied', { from: ['created', 'contacted'] })
+    if (moved) {
+      await contact.save()
+      await logActivity({
+        contact: contact._id, company: contact.company || null,
+        type: 'status_change', user: req.user._id,
+        title: `Status: ${moved.from} → ${moved.to} (reply logged)`,
+        meta: { ...moved, automatic: true },
+      })
+    }
   }
   res.status(201).json({ activity })
 })
@@ -427,20 +537,38 @@ router.post('/bulk', async (req, res) => {
 
   if (action === 'status') {
     if (!value) return res.status(400).json({ error: 'A status is required' })
-    await Contact.updateMany({ _id: { $in: contactIds } }, { $set: { status: value, lastActivityAt: new Date() } })
+    // G17: setting Lost in bulk needs one reason for the whole batch.
+    const lost = await isLostStatus(value)
+    const reason = String(req.body?.lostReason || '').trim()
+    if (lost && !reason) return lostReasonRequired(res)
+    const set = { status: value, lastActivityAt: new Date() }
+    if (lost) set.lostReason = reason
+    if (lost && req.body?.nurture !== undefined) set.nurture = !!req.body.nurture
+    await Contact.updateMany({ _id: { $in: contactIds } }, { $set: set })
     await Activity.insertMany(
       contacts.map((c) => ({
         contact: c._id, company: c.company || null, type: 'status_change', user: req.user._id,
-        title: `Status set to ${value} (bulk)`, meta: { to: value, bulk: true },
+        title: `Status set to ${value}${lost ? ` (${reason})` : ''} (bulk)`, meta: { to: value, bulk: true },
       }))
     )
-    if (value === 'dnc') {
-      await Contact.updateMany({ _id: { $in: contactIds } }, { $set: { doNotContact: true } })
-      for (const id of contactIds) {
-        await suppressContactEverywhere({ contactId: id, reason: 'Bulk do-not-contact', actorId: req.user._id })
+    return res.json({ ok: true, affected: contactIds.length })
+  }
+
+  // Email / call suppression in bulk, with the same rules as one contact.
+  if (action === 'emailStatus' || action === 'dncStatus' || action === 'doNotContact') {
+    const key = action
+    const allowed = key === 'emailStatus' ? EMAIL_STATUS_VALUES : key === 'dncStatus' ? DNC_STATUS_VALUES : null
+    if (allowed && !allowed.includes(value)) return res.status(400).json({ error: 'Pick a valid value' })
+    const docs = await Contact.find({ _id: { $in: contactIds } })
+    for (const c of docs) {
+      const result = await applySuppressionChanges(c, { [key]: key === 'doNotContact' ? !!value : value }, req.user._id)
+      c.lastActivityAt = new Date()
+      await c.save()
+      for (const note of result.notes) {
+        await logActivity({ contact: c._id, company: c.company || null, type: 'suppression_changed', user: req.user._id, title: `${note} (bulk)` })
       }
     }
-    return res.json({ ok: true, affected: contactIds.length })
+    return res.json({ ok: true, affected: docs.length })
   }
 
   if (action === 'owner') {
@@ -873,6 +1001,8 @@ router.post('/import', requirePermission('contacts.import'), upload.single('file
   const tag = (options.tag || '').trim()
   const onDuplicate = options.onDuplicate === 'update' ? 'update' : 'skip'
 
+  const lostStatus = await roleStatus('lost')
+  const createdStatus = await roleStatus('created')
   const suppressions = await Suppression.find().lean()
   const suppressedEmails = new Set(suppressions.filter((s) => s.email).map((s) => s.email))
   const suppressedDomains = new Set(suppressions.filter((s) => s.domain).map((s) => s.domain))
@@ -922,14 +1052,19 @@ router.post('/import', requirePermission('contacts.import'), upload.single('file
     if (tag) doc.tags = [...new Set([...(doc.tags || []), tag])]
     doc.source = source
     doc.owner = owner
+    if (createdStatus && !doc.status) doc.status = createdStatus
 
     if (doc.email && seenEmail.has(doc.email)) { result.skipped++; continue }
     if (doc.linkedinUrl && seenLinkedIn.has(doc.linkedinUrl)) { result.skipped++; continue }
 
     const domain = domainFromEmail(doc.email)
+    // On the do-not-contact list: import them already blocked, as Lost.
     if ((doc.email && suppressedEmails.has(doc.email)) || (domain && suppressedDomains.has(domain))) {
       doc.doNotContact = true
-      doc.status = 'dnc'
+      if (lostStatus) {
+        doc.status = lostStatus
+        doc.lostReason = REASON_UNSUBSCRIBED
+      }
       result.suppressed++
     }
 
@@ -964,6 +1099,8 @@ router.post('/import', requirePermission('contacts.import'), upload.single('file
         if (onDuplicate === 'update') {
           for (const [k, v] of Object.entries(doc)) {
             if (k === 'owner' && !options.reassignOwner) continue
+            // An update never resets an existing contact back to "New".
+            if (k === 'status' && v === createdStatus) continue
             if (k === 'tags') { existing.tags = [...new Set([...existing.tags, ...v])]; continue }
             existing[k] = v
           }

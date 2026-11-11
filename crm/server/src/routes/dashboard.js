@@ -1,4 +1,12 @@
 const express = require('express')
+const { roleStatus } = require('../lib/lifecycle')
+
+/* Status values that mean "meeting booked" in the timeline: the current one,
+ * plus the original key so older history still counts. */
+async function meetingStatuses() {
+  const current = await roleStatus('meeting_booked')
+  return [...new Set([current, 'meeting_booked'].filter(Boolean))]
+}
 const {
   Deal, Quote, Task, OutboxMessage, Contact, Activity, User, Settings,
 } = require('../db')
@@ -232,7 +240,7 @@ const BUILDERS = {
         {
           $match: {
             createdAt: { $gte: since },
-            $or: [{ 'meta.to': 'meeting_booked' }, { outcome: 'meeting_booked' }],
+            $or: [{ 'meta.to': { $in: await meetingStatuses() } }, { outcome: 'meeting_booked' }],
           },
         },
         { $group: { _id: '$user', contacts: { $addToSet: '$contact' } } },
@@ -284,7 +292,8 @@ const BUILDERS = {
     const filter = {
       owner: req.user._id,
       doNotContact: false,
-      status: { $nin: ['customer', 'dnc'] },
+      // Signed and Lost contacts are not "going cold".
+      status: { $nin: (await Promise.all(['won', 'lost'].map(roleStatus))).filter(Boolean) },
       lastActivityAt: { $lt: cutoff },
     }
     const contacts = await Contact.find(filter)

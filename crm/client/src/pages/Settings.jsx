@@ -93,7 +93,13 @@ export default function Settings() {
             {tab === 'currencies' && <Currencies />}
             {tab === 'quotes' && <QuoteApproval />}
             {tab === 'fields' && <CustomFields />}
-            {tab === 'statuses' && <Statuses />}
+            {tab === 'statuses' && (
+              <div className="col" style={{ gap: 14 }}>
+                <StatusCleanup />
+                <Statuses />
+                <LostReasons />
+              </div>
+            )}
             {tab === 'dnc' && <DncList />}
             {tab === 'users' && <Users />}
             {tab === 'company' && <Company />}
@@ -441,13 +447,30 @@ ${settings.unsubscribeText || 'Opt out:'} ${(settings.appBaseUrl || '[app base u
 /* ---------------- Contact statuses ---------------- */
 
 function Statuses() {
-  const { reloadBootstrap } = useAuth()
+  const { reloadBootstrap, statusRoleCatalogue, statusRoles } = useAuth()
   const toast = useToast()
   const [settings, setSettings] = useState(null)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => { api.getSettings().then((d) => setSettings(d.settings)).catch(() => {}) }, [])
   if (!settings) return <Loading />
+
+  /* The role each status holds. Saved roles win; a status without one shows
+     the role the CRM is currently matching to it by name, so nothing looks
+     unset when it is in fact working. */
+  const roleOf = (s) => {
+    if (s.role !== undefined) return s.role
+    const hit = Object.entries(statusRoles).find(([, v]) => v === s.value)
+    return hit ? hit[0] : ''
+  }
+  const setRole = (i, role) => setSettings({
+    ...settings,
+    // A role sits on one status only: take it off any other.
+    contactStatuses: list.map((s, j) => {
+      if (j === i) return { ...s, role }
+      return roleOf(s) === role && role ? { ...s, role: '' } : { ...s, role: roleOf(s) }
+    }),
+  })
 
   const list = settings.contactStatuses
   const patch = (i, key, value) =>
@@ -464,14 +487,25 @@ function Statuses() {
           Renaming a status is safe — contacts store the value, and the label is what you see. Changing the{' '}
           <em>value</em> of a status already in use orphans those contacts, so only do it before you have data.
         </p>
+        <p className="small muted">
+          <strong>Set automatically when</strong> tells the CRM which status to use when something happens — for
+          example a reply is logged, or a deal is won. The status marked <strong>Lost</strong> always needs a
+          Lost reason. Leave a row on “never” for statuses only people set.
+        </p>
         <div className="table-wrap">
           <table className="data">
-            <thead><tr><th>Label</th><th>Value</th><th style={{ width: 70 }}>Colour</th><th /></tr></thead>
+            <thead><tr><th>Label</th><th>Value</th><th>Set automatically when</th><th style={{ width: 70 }}>Colour</th><th /></tr></thead>
             <tbody>
               {list.map((s, i) => (
                 <tr key={i}>
                   <td><input className="input" value={s.label} onChange={(e) => patch(i, 'label', e.target.value)} /></td>
                   <td><input className="input mono" value={s.value} onChange={(e) => patch(i, 'value', e.target.value)} /></td>
+                  <td>
+                    <select className="select" value={roleOf(s)} onChange={(e) => setRole(i, e.target.value)}>
+                      <option value="">— never (manual only) —</option>
+                      {statusRoleCatalogue.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
+                    </select>
+                  </td>
                   <td><input type="color" value={s.color} style={{ width: 44, height: 30, border: 0, background: 'none' }}
                     onChange={(e) => patch(i, 'color', e.target.value)} /></td>
                   <td className="right">
@@ -496,13 +530,157 @@ function Statuses() {
             onClick={async () => {
               setBusy(true)
               try {
-                await api.saveSettings({ contactStatuses: settings.contactStatuses })
+                await api.saveSettings({ contactStatuses: list.map((s) => ({ ...s, role: roleOf(s) })) })
                 await reloadBootstrap()
                 toast.success('Statuses saved')
               } catch (err) { toast.error(err.message) } finally { setBusy(false) }
             }}>
             Save statuses
           </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ---------------- Lost reasons ---------------- */
+function LostReasons() {
+  const { reloadBootstrap } = useAuth()
+  const toast = useToast()
+  const [list, setList] = useState(null)
+  const [draft, setDraft] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => { api.getSettings().then((d) => setList(d.settings.lostReasons || [])).catch(() => {}) }, [])
+  if (!list) return <Loading />
+
+  function add() {
+    const v = draft.trim()
+    if (!v || list.includes(v)) return
+    setList([...list, v])
+    setDraft('')
+  }
+
+  return (
+    <div className="card">
+      <div className="card-head"><h2 style={{ flex: 1 }}>Lost reasons</h2></div>
+      <div className="card-body">
+        <p className="small muted">
+          Used whenever a contact or a deal is set to Lost. The CRM itself records
+          “Unsubscribed / do-not-contact” and “Not interested”, so keep those two in the list.
+        </p>
+        {list.map((r, i) => (
+          <div className="row" key={i} style={{ marginBottom: 6 }}>
+            <input className="input" value={r}
+              onChange={(e) => setList(list.map((x, j) => (j === i ? e.target.value : x)))} />
+            <button className="btn btn-ghost btn-sm" onClick={() => setList(list.filter((_, j) => j !== i))}>✕</button>
+          </div>
+        ))}
+        <div className="row" style={{ marginTop: 10 }}>
+          <input className="input" placeholder="New reason" value={draft} onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add() } }} />
+          <button className="btn btn-sm" onClick={add}>Add</button>
+          <div className="spacer" />
+          <button className="btn btn-primary" disabled={busy}
+            onClick={async () => {
+              setBusy(true)
+              try {
+                await api.saveSettings({ lostReasons: list })
+                await reloadBootstrap()
+                toast.success('Lost reasons saved')
+              } catch (err) { toast.error(err.message) } finally { setBusy(false) }
+            }}>
+            Save reasons
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ---------------- Status clean-up ----------------
+ * Contacts left on a status that no longer exists (e.g. the old Do Not
+ * Contact, Nurture or Customer) are listed here and moved in one step. */
+function StatusCleanup() {
+  const { statuses, statusRoles, lostReasons } = useAuth()
+  const toast = useToast()
+  const [orphans, setOrphans] = useState(null)
+  const [plan, setPlan] = useState({})
+  const [busy, setBusy] = useState('')
+
+  const load = () => api.statusOrphans().then((d) => setOrphans(d.orphans)).catch((err) => toast.error(err.message))
+  useEffect(() => { load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  if (!orphans) return <Loading />
+  if (!orphans.length) return null
+
+  const SUGGEST = {
+    dnc: { lostReason: 'Unsubscribed / do-not-contact' },
+    nurture: { lostReason: 'Not interested', nurture: true },
+  }
+  const planFor = (status) => ({
+    to: status === 'dnc' || status === 'nurture' ? statusRoles.lost || '' : '',
+    ...(SUGGEST[status] || {}),
+    ...(plan[status] || {}),
+  })
+  const update = (status, patch) => setPlan({ ...plan, [status]: { ...planFor(status), ...patch } })
+
+  return (
+    <div className="card">
+      <div className="card-head"><h2 style={{ flex: 1 }}>Contacts on old statuses</h2></div>
+      <div className="card-body">
+        <p className="small muted">
+          These contacts have a status that is no longer in the list above, so they show without a proper status.
+          Move each group to a current status.
+        </p>
+        <div className="table-wrap">
+          <table className="data">
+            <thead><tr><th>Old status</th><th className="num">Contacts</th><th>Move to</th><th>Lost reason</th><th>Nurture</th><th /></tr></thead>
+            <tbody>
+              {orphans.map((o) => {
+                const p = planFor(o.status)
+                const toLost = p.to && p.to === statusRoles.lost
+                return (
+                  <tr key={o.status}>
+                    <td className="mono">{o.status}</td>
+                    <td className="num">{o.count}</td>
+                    <td>
+                      <select className="select" value={p.to} onChange={(e) => update(o.status, { to: e.target.value })}>
+                        <option value="">— choose —</option>
+                        {statuses.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      {toLost ? (
+                        <select className="select" value={p.lostReason || ''} onChange={(e) => update(o.status, { lostReason: e.target.value })}>
+                          <option value="">— required —</option>
+                          {lostReasons.map((r) => <option key={r} value={r}>{r}</option>)}
+                          {p.lostReason && !lostReasons.includes(p.lostReason) && <option value={p.lostReason}>{p.lostReason}</option>}
+                        </select>
+                      ) : <span className="faint">—</span>}
+                    </td>
+                    <td>
+                      <input type="checkbox" className="checkbox" checked={!!p.nurture}
+                        onChange={(e) => update(o.status, { nurture: e.target.checked })} />
+                    </td>
+                    <td className="right">
+                      <button className="btn btn-primary btn-sm"
+                        disabled={!p.to || (toLost && !p.lostReason) || busy === o.status}
+                        onClick={async () => {
+                          setBusy(o.status)
+                          try {
+                            const r = await api.remapStatusOrphans({ from: o.status, to: p.to, lostReason: p.lostReason, nurture: !!p.nurture })
+                            toast.success(`${r.moved} contact${r.moved === 1 ? '' : 's'} moved`)
+                            load()
+                          } catch (err) { toast.error(err.message) } finally { setBusy('') }
+                        }}>
+                        Move
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>
