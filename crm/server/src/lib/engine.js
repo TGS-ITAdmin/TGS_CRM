@@ -9,7 +9,7 @@ const {
 } = require('../db')
 const { renderStage } = require('./merge')
 const { suppressionReason } = require('./compliance')
-const { channelBlock } = require('./lifecycle')
+const { channelBlock, statusList, statusForRole } = require('./lifecycle')
 
 /* The stage engine.
  *
@@ -136,6 +136,41 @@ async function materializeStage({ enrollment, campaign, contact, stageIndex, act
   return { kind: 'task', id: task._id, missing: merged.missing }
 }
 
+/* After-campaign re-check (campaign.recheck). Only for someone who finished
+ * with no response — still at New or Contacted, not Lost, not suppressed.
+ * Anyone who replied, booked or opted out has already moved on. */
+async function scheduleRecheck({ campaign, contact, enrollment, now = new Date() }) {
+  const rc = campaign.recheck
+  if (!rc || !rc.enabled) return null
+  if (contact.doNotContact) return null
+  const list = await statusList()
+  const quiet = ['created', 'contacted'].map((r) => statusForRole(list, r)).filter(Boolean)
+  if (quiet.length && !quiet.includes(contact.status)) return null
+
+  const days = Math.max(1, Number(rc.days) || 30)
+  const name = [contact.firstName, contact.lastName].filter(Boolean).join(' ') || contact.companyName || 'contact'
+  const task = await Task.create({
+    contact: contact._id,
+    enrollment: enrollment._id,
+    campaign: campaign._id,
+    stageIndex: campaign.stages.length - 1,
+    stageName: rc.title || 'Re-check',
+    channel: 'internal',
+    kind: 'recheck',
+    title: `${rc.title || 'Re-check'} — ${name}`,
+    scriptBody: rc.instructions || '',
+    assignedTo: rc.assignTo || contact.owner || enrollment.enrolledBy || null,
+    dueAt: addDays(now, days),
+  })
+  await logActivity({
+    contact: contact._id,
+    type: 'recheck_logged',
+    campaign: campaign._id,
+    title: `Re-check scheduled in ${days} day${days === 1 ? '' : 's'}: ${rc.title || 'Re-check'}`,
+  })
+  return { id: task._id, dueAt: task.dueAt }
+}
+
 /* Enrol a contact into a campaign at stage 0. */
 async function enroll({ contactId, campaignId, actorId }) {
   const [contact, campaign] = await Promise.all([
@@ -233,7 +268,8 @@ async function advance({ enrollment, actorId = null, manual = false }) {
       user: actorId,
       title: `Finished "${campaign.name}"`,
     })
-    return { advanced: false, completed: true }
+    const recheck = await scheduleRecheck({ campaign, contact, enrollment, now })
+    return { advanced: false, completed: true, recheck }
   }
 
   // Work for the stage we are leaving is now stale — a first-touch message
@@ -444,6 +480,7 @@ async function suppressContactEverywhere({ contactId, reason, actorId, keepCallT
 }
 
 module.exports = {
+  scheduleRecheck,
   enroll,
   advance,
   setStage,

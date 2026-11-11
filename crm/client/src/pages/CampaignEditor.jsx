@@ -21,7 +21,7 @@ const CHANNEL_HELP = {
 
 export default function CampaignEditor() {
   const { id } = useParams()
-  const { can, mergeFields } = useAuth()
+  const { can, mergeFields, users } = useAuth()
   const isAdmin = can('campaigns.manage')
   const toast = useToast()
 
@@ -80,6 +80,7 @@ export default function CampaignEditor() {
         description: campaign.description,
         stages: campaign.stages,
         active: campaign.active,
+        recheck: campaign.recheck,
       })
       toast.success('Campaign saved')
       load()
@@ -242,6 +243,11 @@ export default function CampaignEditor() {
             This campaign has no stages, so contacts cannot be added to it yet.
           </div>
         )}
+
+        <RecheckSettings
+          recheck={campaign.recheck || {}} users={users} disabled={!isAdmin} campaignName={campaign.name}
+          onChange={(key, value) => patch((c) => { c.recheck = { ...(c.recheck || {}), [key]: value }; return c })}
+        />
       </div>
 
       {preview !== null && (
@@ -326,5 +332,62 @@ function PreviewModal({ campaignId, index, stage, onClose }) {
         </>
       )}
     </Modal>
+  )
+}
+
+/* "After the last stage": an optional check task some days after a contact
+ * finishes with no response — for F2, "is the job post still open?". The
+ * person answering it can put the contact straight back into this campaign. */
+function RecheckSettings({ recheck, users, disabled, campaignName, onChange }) {
+  const on = !!recheck.enabled
+  return (
+    <div className="card" style={{ marginTop: 18 }}>
+      <div className="card-head"><h2>After the last stage</h2></div>
+      <div className="card-body">
+        <label className="row" style={{ gap: 9, alignItems: 'flex-start', cursor: disabled ? 'default' : 'pointer' }}>
+          <input type="checkbox" className="checkbox" style={{ marginTop: 2 }} checked={on} disabled={disabled}
+            onChange={(e) => onChange('enabled', e.target.checked)} />
+          <div>
+            <div className="strong small">Create a re-check task after the campaign ends with no response</div>
+            <div className="hint" style={{ marginTop: 2 }}>
+              The task asks one question. Answering <strong>Still open</strong> puts the contact back into
+              “{campaignName}” from stage 1; <strong>Closed</strong> just logs it. Contacts who replied, booked,
+              were marked Lost or opted out never get the task.
+            </div>
+          </div>
+        </label>
+
+        {on && (
+          <div style={{ marginTop: 14 }}>
+            <div className="grid grid-2">
+              <div className="field">
+                <label className="label">Days after the campaign ends</label>
+                <input className="input" type="number" min="1" max="365" value={recheck.days ?? 30} disabled={disabled}
+                  onChange={(e) => onChange('days', Number(e.target.value))} />
+              </div>
+              <div className="field">
+                <label className="label">Assign the task to</label>
+                <select className="select" value={recheck.assignTo || ''} disabled={disabled}
+                  onChange={(e) => onChange('assignTo', e.target.value || null)}>
+                  <option value="">The contact's owner</option>
+                  {users.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="field">
+              <label className="label">Task title</label>
+              <input className="input" value={recheck.title ?? 'Check if the job post is still open'} disabled={disabled}
+                onChange={(e) => onChange('title', e.target.value)} />
+            </div>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label className="label">Instructions shown on the task</label>
+              <textarea className="textarea" rows={3} value={recheck.instructions || ''} disabled={disabled}
+                placeholder="e.g. Open the job post URL on the contact. If the CSR / dispatcher role is still listed, choose Still open."
+                onChange={(e) => onChange('instructions', e.target.value)} />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   )
 }

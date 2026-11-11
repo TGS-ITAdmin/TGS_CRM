@@ -257,6 +257,7 @@ a:hover { text-decoration: underline; }
 .chan-linkedin { background: var(--linkedin-soft); color: var(--linkedin); }
 .chan-email { background: var(--email-soft); color: var(--email); }
 .chan-call { background: var(--call-soft); color: var(--call); }
+.chan-internal { background: var(--surface-2); color: var(--text-muted); }
 
 .tag {
   display: inline-flex; align-items: center; gap: 4px;

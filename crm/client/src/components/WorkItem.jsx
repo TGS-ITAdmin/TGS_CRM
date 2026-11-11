@@ -47,6 +47,15 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
       'Logged'
     )
 
+  const isRecheck = task.kind === 'recheck'
+  const answerRecheck = (answer) =>
+    run(
+      () => api.completeTask(task._id, { answer, notes: notes || undefined }),
+      answer === 'open'
+        ? `Back into ${task.campaign?.name || 'the campaign'} from stage 1`
+        : 'Logged — not re-enrolled'
+    )
+
   return (
     <div className={`work-item${overdue ? ' overdue' : ''}${open ? ' open' : ''}`}>
       <div className="work-row" onClick={() => setOpen((o) => !o)}>
@@ -96,13 +105,17 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
 
           {task.scriptBody ? (
             <div className="script-box">{task.scriptBody}</div>
+          ) : isRecheck ? (
+            <div className="small faint">
+              Check, then answer below. Still open puts them back into {task.campaign?.name || 'the campaign'}.
+            </div>
           ) : (
             <div className="small faint">This stage has no script. Use your own judgement.</div>
           )}
 
           <div className="divider" />
 
-          <div className="grid grid-2">
+          {!isRecheck && <div className="grid grid-2">
             {task.channel === 'call' && (
               <div className="field" style={{ margin: 0 }}>
                 <label className="label">How did the call go?</label>
@@ -128,7 +141,7 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
                 <option value="30">1 month</option>
               </select>
             </div>
-          </div>
+          </div>}
 
           <div className="field" style={{ marginTop: 12 }}>
             <label className="label">Notes (saved to the timeline)</label>
@@ -140,12 +153,23 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
           </div>
 
           <div className="row">
-            <button
-              className="btn btn-primary" disabled={busy || (task.channel === 'call' && !outcome)}
-              onClick={complete}
-            >
-              {busy ? 'Saving…' : task.channel === 'call' ? 'Log call & close' : 'Mark done'}
-            </button>
+            {isRecheck ? (
+              <>
+                <button className="btn btn-primary" disabled={busy} onClick={() => answerRecheck('open')}>
+                  {busy ? 'Saving…' : `Still open — re-enrol in ${task.campaign?.name || 'campaign'}`}
+                </button>
+                <button className="btn" disabled={busy} onClick={() => answerRecheck('closed')}>
+                  Closed / filled
+                </button>
+              </>
+            ) : (
+              <button
+                className="btn btn-primary" disabled={busy || (task.channel === 'call' && !outcome)}
+                onClick={complete}
+              >
+                {busy ? 'Saving…' : task.channel === 'call' ? 'Log call & close' : 'Mark done'}
+              </button>
+            )}
             <button className="btn" disabled={busy}
               onClick={() => run(() => api.snoozeTask(task._id, 1), 'Snoozed to tomorrow')}>
               Snooze 1 day

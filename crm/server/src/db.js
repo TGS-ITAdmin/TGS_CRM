@@ -364,6 +364,17 @@ const campaignSchema = new Schema(
     stages: { type: [stageSchema], default: [] },
     active: { type: Boolean, default: true, index: true },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    /* Optional follow-up after someone finishes the campaign with no
+       response: a check task N days later (e.g. F2: "is the job post still
+       open?"). Answering "yes" puts them back into this same campaign. */
+    recheck: {
+      enabled: { type: Boolean, default: false },
+      days: { type: Number, default: 30, min: 1 },
+      title: { type: String, default: 'Check if the job post is still open' },
+      instructions: { type: String, default: '' },
+      // Who gets the task; empty = the contact's owner.
+      assignTo: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+    },
   },
   { timestamps: true }
 )
@@ -430,8 +441,11 @@ const taskSchema = new Schema(
     campaign: { type: Schema.Types.ObjectId, ref: 'Campaign', index: true },
     stageIndex: { type: Number, default: 0 },
     stageName: { type: String, default: '' },
-    channel: { type: String, enum: CHANNELS, required: true },
+    // 'internal' is a to-do with no outreach (e.g. a re-check).
+    channel: { type: String, enum: [...CHANNELS, 'internal'], required: true },
     title: { type: String, required: true },
+    // 'recheck': the after-campaign check; finishing it can re-enrol.
+    kind: { type: String, enum: ['', 'recheck'], default: '' },
     // The stage script with merge fields already resolved, ready to use.
     scriptBody: { type: String, default: '' },
     assignedTo: { type: Schema.Types.ObjectId, ref: 'User', index: true },
@@ -865,6 +879,7 @@ const ACTIVITY_TYPES = [
   'unsubscribed',
   'dnc_added',
   'step_skipped',
+  'recheck_logged',
   'suppression_changed',
   'campaign_paused',
   'reply_logged',

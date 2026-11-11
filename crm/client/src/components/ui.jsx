@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
-export const CHANNEL_LABEL = { linkedin: 'LinkedIn', email: 'Email', call: 'Call' }
-export const CHANNEL_ICON = { linkedin: 'in', email: '@', call: '☎' }
+export const CHANNEL_LABEL = { linkedin: 'LinkedIn', email: 'Email', call: 'Call', internal: 'Internal' }
+export const CHANNEL_ICON = { linkedin: 'in', email: '@', call: '☎', internal: '✓' }
 
 export function Channel({ value, showLabel = true }) {
   if (!value) return null

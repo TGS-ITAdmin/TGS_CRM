@@ -86,10 +86,20 @@ router.put('/:id', requirePermission('campaigns.manage'), async (req, res) => {
   const campaign = await Campaign.findById(req.params.id)
   if (!campaign) return res.status(404).json({ error: 'Campaign not found' })
 
-  const { name, description, stages, active } = req.body || {}
+  const { name, description, stages, active, recheck } = req.body || {}
   if (name !== undefined) campaign.name = String(name).trim()
   if (description !== undefined) campaign.description = description
   if (active !== undefined) campaign.active = !!active
+  if (recheck !== undefined) {
+    const rc = recheck || {}
+    campaign.recheck = {
+      enabled: !!rc.enabled,
+      days: Math.min(365, Math.max(1, parseInt(rc.days, 10) || 30)),
+      title: String(rc.title || '').trim().slice(0, 200) || 'Re-check',
+      instructions: String(rc.instructions || '').slice(0, 5000),
+      assignTo: /^[0-9a-f]{24}$/i.test(String(rc.assignTo || '')) ? rc.assignTo : null,
+    }
+  }
 
   if (stages !== undefined) {
     const next = sanitizeStages(stages)

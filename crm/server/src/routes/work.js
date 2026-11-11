@@ -3,7 +3,7 @@ const {
   Task, OutboxMessage, Contact, Enrollment, Quote, Activity, Campaign, CALL_OUTCOMES,
 } = require('../db')
 const { requireAuth, assignedScope, ownerScope } = require('../middleware/auth')
-const { logActivity, advance, suppressContactEverywhere } = require('../lib/engine')
+const { logActivity, advance, enroll, suppressContactEverywhere } = require('../lib/engine')
 const { sendMessage } = require('../lib/mailer')
 const { suppressionReason } = require('../lib/compliance')
 const { advanceStatus, markLost, REASON_NOT_INTERESTED, REASON_UNSUBSCRIBED } = require('../lib/lifecycle')
@@ -155,6 +155,9 @@ router.post('/tasks/:id/complete', async (req, res) => {
   const { outcome, notes, callbackDays, advanceNow } = req.body || {}
   let dealResult = null
 
+  // The after-campaign re-check has its own answer instead of an outcome.
+  if (task.kind === 'recheck') return completeRecheck(req, res, task)
+
   if (task.channel === 'call' && !outcome) {
     return res.status(400).json({ error: 'Pick a call outcome' })
   }
@@ -277,6 +280,60 @@ router.post('/tasks/:id/complete', async (req, res) => {
 
   res.json({ ok: true, task, callbackTask, advanced, deal: dealResult })
 })
+
+/* Answer to an after-campaign re-check, e.g. F2's "is the job post still open?"
+ *   answer 'open'   → the contact goes back into the same campaign at stage 1
+ *   answer 'closed' → logged; nothing else happens
+ * Re-enrolling is refused (and the task stays open) when the contact may no
+ * longer be contacted, is already in another campaign, or the campaign is
+ * paused — so the check can be answered again once that is sorted. */
+async function completeRecheck(req, res, task) {
+  const { answer, notes } = req.body || {}
+  if (!['open', 'closed'].includes(answer)) {
+    return res.status(400).json({ error: 'Answer the check: still open, or closed' })
+  }
+  const contact = await Contact.findById(task.contact)
+  const campaign = await Campaign.findById(task.campaign)
+  if (!contact) return res.status(404).json({ error: 'Contact not found' })
+
+  let enrollment = null
+  if (answer === 'open') {
+    if (!campaign) return res.status(400).json({ error: 'That campaign no longer exists' })
+    if (contact.doNotContact) return res.status(400).json({ error: 'This contact is flagged do not contact' })
+    const elsewhere = await Enrollment.findOne({ contact: contact._id, status: 'active' }).populate('campaign', 'name').lean()
+    if (elsewhere) {
+      return res.status(409).json({
+        error: `${contact.firstName || 'This contact'} is already running in "${elsewhere.campaign?.name || 'another campaign'}". `
+          + 'Finish or remove that first, then answer this check again.',
+      })
+    }
+    try {
+      enrollment = await enroll({ contactId: contact._id, campaignId: campaign._id, actorId: req.user._id })
+    } catch (err) {
+      return res.status(err.status || 400).json({ error: err.message })
+    }
+  }
+
+  task.status = 'done'
+  task.outcome = answer
+  task.notes = notes || ''
+  task.completedAt = new Date()
+  task.completedBy = req.user._id
+  await task.save()
+
+  await logActivity({
+    contact: contact._id,
+    type: 'recheck_logged',
+    campaign: task.campaign,
+    user: req.user._id,
+    title: answer === 'open'
+      ? `${task.stageName}: still open — back into "${campaign.name}"`
+      : `${task.stageName}: closed — not re-enrolled`,
+    body: notes || '',
+  })
+
+  res.json({ ok: true, task, reenrolled: !!enrollment })
+}
 
 router.post('/tasks/:id/skip', async (req, res) => {
   const task = await Task.findOne({ _id: req.params.id, ...assignedScope(req) })
