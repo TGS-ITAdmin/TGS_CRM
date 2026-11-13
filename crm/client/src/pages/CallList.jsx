@@ -31,9 +31,9 @@ export default function CallList() {
   }, [])
 
   const items = data?.items || []
-  const reachable = items.filter((t) => t.inBusinessHours === true)
-  const unknown = items.filter((t) => t.inBusinessHours === null)
-  const asleep = items.filter((t) => t.inBusinessHours === false)
+  const reachable = items.filter((t) => t.inCallWindow === true)
+  const unknown = items.filter((t) => t.inCallWindow === null)
+  const asleep = items.filter((t) => t.inCallWindow === false)
   const shown = hideOutOfHours ? [...reachable, ...unknown] : items
 
   return (
@@ -42,7 +42,7 @@ export default function CallList() {
         <div>
           <h1>Call List</h1>
           <div className="topbar-sub">
-            Sorted by who is inside business hours right now · your timezone is {user.timezone || 'not set'}
+            Sorted by who is inside a call window right now · your timezone is {user.timezone || 'not set'}
           </div>
         </div>
         <div className="spacer" />
@@ -69,7 +69,7 @@ export default function CallList() {
               <div className="stat">
                 <div className="stat-label">Callable now</div>
                 <div className="stat-value" style={{ color: 'var(--call)' }}>{reachable.length}</div>
-                <div className="stat-sub">between 8am and 6pm their time</div>
+                <div className="stat-sub">in a call window (9–11am or 4–6pm their time)</div>
               </div>
               <div className="stat">
                 <div className="stat-label">Out of hours</div>
@@ -87,7 +87,7 @@ export default function CallList() {
               <label className="row small" style={{ marginBottom: 12 }}>
                 <input type="checkbox" className="checkbox" checked={hideOutOfHours}
                   onChange={(e) => setHideOutOfHours(e.target.checked)} />
-                Hide the {asleep.length} contact{asleep.length === 1 ? '' : 's'} currently outside business hours
+                Hide the {asleep.length} contact{asleep.length === 1 ? '' : 's'} currently outside a call window
               </label>
             )}
 
@@ -97,10 +97,10 @@ export default function CallList() {
                   className="small"
                   style={{
                     position: 'absolute', right: 14, top: -7, zIndex: 2,
-                    background: task.inBusinessHours === true ? 'var(--call-soft)'
-                      : task.inBusinessHours === false ? 'var(--warn-soft)' : 'var(--surface-2)',
-                    color: task.inBusinessHours === true ? 'var(--call)'
-                      : task.inBusinessHours === false ? 'var(--warn)' : 'var(--text-faint)',
+                    background: task.inCallWindow === true ? 'var(--call-soft)'
+                      : task.inCallWindow === false ? 'var(--warn-soft)' : 'var(--surface-2)',
+                    color: task.inCallWindow === true ? 'var(--call)'
+                      : task.inCallWindow === false ? 'var(--warn)' : 'var(--text-faint)',
                     border: '1px solid currentColor', borderRadius: 20, padding: '1px 9px',
                     fontWeight: 620, fontSize: 11,
                   }}

@@ -23,6 +23,8 @@ function sanitizeStages(stages) {
     subject: String(s.subject || ''),
     body: String(s.body || ''),
     waitDays: Math.max(0, Number(s.waitDays) || 0),
+    voicemail: s.channel === 'call' && !!s.voicemail,
+    linkedinInvite: s.channel === 'linkedin' && !!s.linkedinInvite,
   }))
 }
 
@@ -86,7 +88,9 @@ router.put('/:id', requirePermission('campaigns.manage'), async (req, res) => {
   const campaign = await Campaign.findById(req.params.id)
   if (!campaign) return res.status(404).json({ error: 'Campaign not found' })
 
-  const { name, description, stages, active, recheck } = req.body || {}
+  const { name, description, stages, active, recheck, cold, businessDays } = req.body || {}
+  if (cold !== undefined) campaign.cold = !!cold
+  if (businessDays !== undefined) campaign.businessDays = !!businessDays
   if (name !== undefined) campaign.name = String(name).trim()
   if (description !== undefined) campaign.description = description
   if (active !== undefined) campaign.active = !!active
@@ -132,7 +136,7 @@ router.put('/:id', requirePermission('campaigns.manage'), async (req, res) => {
 router.delete('/:id', requirePermission('campaigns.manage'), async (req, res) => {
   const campaign = await Campaign.findById(req.params.id)
   if (!campaign) return res.status(404).json({ error: 'Campaign not found' })
-  const activeCount = await Enrollment.countDocuments({ campaign: campaign._id, status: 'active' })
+  const activeCount = await Enrollment.countDocuments({ campaign: campaign._id, status: { $in: ['active', 'paused'] } })
   if (activeCount > 0 && req.query.force !== 'true') {
     return res.status(409).json({
       error: `${activeCount} contacts are still running in this campaign.`,
@@ -141,7 +145,7 @@ router.delete('/:id', requirePermission('campaigns.manage'), async (req, res) =>
     })
   }
 
-  const enrollments = await Enrollment.find({ campaign: campaign._id, status: 'active' })
+  const enrollments = await Enrollment.find({ campaign: campaign._id, status: { $in: ['active', 'paused'] } })
   let cancelledTasks = 0
   let cancelledMessages = 0
   for (const e of enrollments) {
@@ -281,7 +285,7 @@ router.post('/move', async (req, res) => {
 
   for (const l of allowed) {
     try {
-      const exitFilter = { contact: l._id, status: 'active' }
+      const exitFilter = { contact: l._id, status: { $in: ['active', 'paused'] } }
       // Blank fromCampaign means "pull them out of everything they're in".
       if (fromCampaign) exitFilter.campaign = fromCampaign
       else exitFilter.campaign = { $ne: target._id }
@@ -343,7 +347,7 @@ router.post('/enrollments/:id/stage', async (req, res) => {
 router.post('/enrollments/:id/exit', async (req, res) => {
   const enrollment = await Enrollment.findById(req.params.id)
   if (!enrollment) return res.status(404).json({ error: 'Enrollment not found' })
-  if (enrollment.status !== 'active') return res.status(400).json({ error: 'That enrollment is no longer active' })
+  if (!['active', 'paused'].includes(enrollment.status)) return res.status(400).json({ error: 'That enrollment is no longer active' })
 
   const contact = await Contact.findOne({ _id: enrollment.contact, ...ownerScope(req) })
   if (!contact) return res.status(403).json({ error: 'That contact is not yours' })

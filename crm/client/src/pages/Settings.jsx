@@ -37,6 +37,7 @@ export default function Settings() {
       items: [
         ...(settingsAdmin ? [{ key: 'fields', label: 'Custom fields', hint: 'Add fields to any record' }] : []),
         ...(settingsAdmin ? [{ key: 'statuses', label: 'Contact statuses', hint: 'The lifecycle list' }] : []),
+        ...(settingsAdmin ? [{ key: 'rules', label: 'Outreach rules', hint: 'Business days, call windows, caps, sign-off' }] : []),
         { key: 'dnc', label: 'Do Not Contact', hint: 'Suppression list' },
       ],
     },
@@ -93,6 +94,7 @@ export default function Settings() {
             {tab === 'currencies' && <Currencies />}
             {tab === 'quotes' && <QuoteApproval />}
             {tab === 'fields' && <CustomFields />}
+            {tab === 'rules' && <OutreachRules />}
             {tab === 'statuses' && (
               <div className="col" style={{ gap: 14 }}>
                 <StatusCleanup />
@@ -538,6 +540,139 @@ function Statuses() {
             Save statuses
           </button>
         </div>
+      </div>
+    </div>
+  )
+}
+
+/* ---------------- Outreach rules (G5 G9 G10 G11 G12) ---------------- */
+function OutreachRules() {
+  const { reloadBootstrap } = useAuth()
+  const toast = useToast()
+  const [r, setR] = useState(null)
+  const [holidayDraft, setHolidayDraft] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => { api.getRules().then((d) => setR(d.rules)).catch((err) => toast.error(err.message)) }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  if (!r) return <Loading />
+
+  const setCap = (k, v) => setR({ ...r, touchCaps: { ...r.touchCaps, [k]: v } })
+  const setWin = (i, k, v) => setR({ ...r, callWindows: r.callWindows.map((w, j) => (j === i ? { ...w, [k]: Number(v) } : w)) })
+
+  async function save() {
+    setBusy(true)
+    try {
+      const d = await api.saveRules({
+        businessTimezone: r.businessTimezone, holidays: r.holidays, callWindows: r.callWindows,
+        touchCaps: r.touchCaps, linkedinInviteCap: r.linkedinInviteCap,
+      })
+      setR(d.rules)
+      await reloadBootstrap()
+      toast.success('Outreach rules saved')
+    } catch (err) { toast.error(err.message) } finally { setBusy(false) }
+  }
+
+  async function signoff(withdraw) {
+    try {
+      const d = await api.complianceSignoff({ withdraw })
+      setR(d.rules)
+      await reloadBootstrap()
+      toast.success(withdraw ? 'Sign-off withdrawn — cold email and calls are on hold' : 'Compliance sign-off recorded')
+    } catch (err) { toast.error(err.message) }
+  }
+
+  return (
+    <div className="col" style={{ gap: 14 }}>
+      <div className="card">
+        <div className="card-head"><h2>Compliance sign-off (G12)</h2></div>
+        <div className="card-body">
+          {r.complianceSignedOffAt ? (
+            <div className="banner banner-info" style={{ marginBottom: 10 }}>
+              <span>✓</span>
+              <div>Signed off {new Date(r.complianceSignedOffAt).toLocaleString()}{r.complianceSignedOffBy ? ` by ${r.complianceSignedOffBy}` : ''}. Cold flows create email and call steps.</div>
+            </div>
+          ) : (
+            <div className="banner banner-warn" style={{ marginBottom: 10 }}>
+              <span>!</span>
+              <div>Not signed off. Campaigns marked <strong>Cold flow</strong> skip every email and call step (LinkedIn and internal steps still run).</div>
+            </div>
+          )}
+          {r.complianceSignedOffAt
+            ? <button className="btn btn-sm" onClick={() => signoff(true)}>Withdraw sign-off</button>
+            : <button className="btn btn-primary btn-sm" onClick={() => signoff(false)}>Record compliance sign-off now</button>}
+          <div className="hint" style={{ marginTop: 8 }}>Steps skipped before the sign-off are not re-created afterwards; enrol cold contacts after signing off.</div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-head"><h2>Business days (G11)</h2></div>
+        <div className="card-body">
+          <div className="field" style={{ maxWidth: 320 }}>
+            <label className="label">Business time zone</label>
+            <input className="input" value={r.businessTimezone} onChange={(e) => setR({ ...r, businessTimezone: e.target.value })} />
+            <div className="hint">Used for business days, “US business hours” and the escalation cut-off. e.g. America/New_York</div>
+          </div>
+          <label className="label">Holidays (skipped like weekends)</label>
+          <div className="row" style={{ flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+            {r.holidays.map((d) => (
+              <span key={d} className="tag">
+                {d}{' '}
+                <button className="btn btn-ghost btn-sm" style={{ padding: '0 4px' }}
+                  onClick={() => setR({ ...r, holidays: r.holidays.filter((x) => x !== d) })}>✕</button>
+              </span>
+            ))}
+          </div>
+          <div className="row" style={{ maxWidth: 320 }}>
+            <input className="input" type="date" value={holidayDraft} onChange={(e) => setHolidayDraft(e.target.value)} />
+            <button className="btn btn-sm" disabled={!holidayDraft}
+              onClick={() => { setR({ ...r, holidays: [...new Set([...r.holidays, holidayDraft])].sort() }); setHolidayDraft('') }}>
+              Add
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-head"><h2>Call windows (G5)</h2></div>
+        <div className="card-body">
+          <p className="small muted">Call tasks are scheduled into these hours in the contact's own time zone, Mon–Fri. 9–11am and 4–6pm sit inside every US state's calling hours.</p>
+          {r.callWindows.map((w, i) => (
+            <div className="row" key={i} style={{ marginBottom: 6, maxWidth: 360 }}>
+              <input className="input" type="number" min="0" max="23" value={w.start} onChange={(e) => setWin(i, 'start', e.target.value)} />
+              <span className="small">:00 to</span>
+              <input className="input" type="number" min="1" max="24" value={w.end} onChange={(e) => setWin(i, 'end', e.target.value)} />
+              <span className="small">:00</span>
+              <button className="btn btn-ghost btn-sm" disabled={r.callWindows.length < 2}
+                onClick={() => setR({ ...r, callWindows: r.callWindows.filter((_, j) => j !== i) })}>✕</button>
+            </div>
+          ))}
+          <button className="btn btn-sm" onClick={() => setR({ ...r, callWindows: [...r.callWindows, { start: 13, end: 14 }] })}>+ Add window</button>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-head"><h2>Limits (G9, G10)</h2></div>
+        <div className="card-body">
+          <label className="label">Touch caps per contact, per cold flow</label>
+          <div className="grid grid-3" style={{ maxWidth: 480 }}>
+            {['email', 'call', 'linkedin'].map((k) => (
+              <div className="field" key={k}>
+                <label className="label">{k === 'linkedin' ? 'LinkedIn' : k === 'call' ? 'Calls' : 'Emails'}</label>
+                <input className="input" type="number" min="0" value={r.touchCaps[k]} onChange={(e) => setCap(k, Number(e.target.value))} />
+              </div>
+            ))}
+          </div>
+          <div className="field" style={{ maxWidth: 320 }}>
+            <label className="label">LinkedIn invites per rep, per business day</label>
+            <input className="input" type="number" min="1" value={r.linkedinInviteCap} onChange={(e) => setR({ ...r, linkedinInviteCap: Number(e.target.value) })} />
+            <div className="hint">Extra invites roll to the next business day. Applies to stages ticked “Connection invite”.</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="row">
+        <div className="spacer" />
+        <button className="btn btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save outreach rules'}</button>
       </div>
     </div>
   )

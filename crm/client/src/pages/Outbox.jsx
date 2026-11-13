@@ -15,7 +15,7 @@ const TABS = [
 ]
 
 export default function Outbox() {
-  const { smtp } = useAuth()
+  const { smtp, users } = useAuth()
   const toast = useToast()
   const [tab, setTab] = useState('queued')
   const [page, setPage] = useState(1)
@@ -29,7 +29,8 @@ export default function Outbox() {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      setData(await api.listOutbox({ status: tab, page, limit: 50 }))
+      // Ready to send loads more per page so whole daily batches are visible (G14).
+      setData(await api.listOutbox({ status: tab, page, limit: tab === 'queued' ? 200 : 50 }))
       setSelected(new Set())
     } catch (err) {
       toast.error(err.message)
@@ -41,6 +42,19 @@ export default function Outbox() {
   useEffect(() => { load() }, [load])
 
   const items = data?.items || []
+
+  /* G14: one batch per template (campaign + stage), per inbox (the sender),
+     per day. Selecting a batch ticks exactly its drafts. */
+  const userName = (id) => users.find((u) => u.id === String(id))?.name || 'Unassigned inbox'
+  const batches = tab !== 'queued' ? [] : Object.values(items.reduce((acc, m) => {
+    const day = new Date(m.createdAt).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+    const key = [m.campaign?._id || 'none', m.stageName || m.subject, m.assignedTo || 'none', day].join('|')
+    if (!acc[key]) {
+      acc[key] = { key, campaign: m.campaign?.name || 'No campaign', stage: m.stageName || m.subject || 'Email', inbox: userName(m.assignedTo), day, ids: [] }
+    }
+    acc[key].ids.push(m._id)
+    return acc
+  }, {}))
   const allChecked = items.length > 0 && items.every((m) => selected.has(m._id))
   const canSend = smtp?.configured && !smtp?.complianceBlocked
 
@@ -121,6 +135,36 @@ export default function Outbox() {
               Send {selected.size}
             </button>
             <button className="btn btn-ghost btn-sm" onClick={() => setSelected(new Set())}>Clear</button>
+          </div>
+        )}
+
+        {batches.length > 0 && (
+          <div className="card" style={{ marginBottom: 14 }}>
+            <div className="card-head"><h2 style={{ flex: 1 }}>Today's batches</h2>
+              <span className="small faint">One per template, per inbox, per day</span></div>
+            <div className="table-wrap">
+              <table className="data">
+                <thead><tr><th>Template</th><th>Inbox</th><th>Day</th><th className="num">Emails</th><th /></tr></thead>
+                <tbody>
+                  {batches.map((b) => {
+                    const on = b.ids.every((id) => selected.has(id))
+                    return (
+                      <tr key={b.key}>
+                        <td><strong>{b.stage}</strong><div className="small faint">{b.campaign}</div></td>
+                        <td>{b.inbox}</td>
+                        <td className="nowrap">{b.day}</td>
+                        <td className="num">{b.ids.length}</td>
+                        <td className="right nowrap">
+                          <button className="btn btn-sm" onClick={() => setSelected(on ? new Set() : new Set(b.ids))}>
+                            {on ? 'Clear' : 'Select batch'}
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 

@@ -81,6 +81,8 @@ export default function CampaignEditor() {
         stages: campaign.stages,
         active: campaign.active,
         recheck: campaign.recheck,
+        cold: campaign.cold === true,
+        businessDays: campaign.businessDays !== false,
       })
       toast.success('Campaign saved')
       load()
@@ -143,6 +145,21 @@ export default function CampaignEditor() {
                 where it left off.
               </label>
             )}
+            {isAdmin && (
+              <label className="row small" style={{ marginTop: 8 }}>
+                <input type="checkbox" className="checkbox" checked={campaign.cold === true}
+                  onChange={(e) => patch((c) => { c.cold = e.target.checked; return c })} />
+                Cold flow (F1–F3) — no email or call steps until the compliance sign-off is recorded, and touch
+                caps apply (set both in Settings → Outreach rules).
+              </label>
+            )}
+            {isAdmin && (
+              <label className="row small" style={{ marginTop: 8 }}>
+                <input type="checkbox" className="checkbox" checked={campaign.businessDays !== false}
+                  onChange={(e) => patch((c) => { c.businessDays = e.target.checked; return c })} />
+                Waits count business days (Mon–Fri, skipping holidays). Turn off for calendar-day flows like F6, F8, F9.
+              </label>
+            )}
           </div>
         </div>
 
@@ -202,7 +219,7 @@ export default function CampaignEditor() {
                     </select>
                   </Field>
                   <Field
-                    label="Wait before next stage"
+                    label="Wait before next stage (days)"
                     hint={i === stages.length - 1 ? 'After this wait the contact finishes the campaign.' : `Contact moves to "${stages[i + 1].name}" after this many days.`}
                   >
                     <input className="input" type="number" min="0" value={stage.waitDays} disabled={!isAdmin}
@@ -211,6 +228,20 @@ export default function CampaignEditor() {
                 </div>
 
                 <div className="hint" style={{ marginTop: -4, marginBottom: 12 }}>{CHANNEL_HELP[stage.channel]}</div>
+                {stage.channel === 'call' && (
+                  <label className="row small" style={{ gap: 8, marginBottom: 12 }}>
+                    <input type="checkbox" className="checkbox" checked={!!stage.voicemail} disabled={!isAdmin}
+                      onChange={(e) => setStage(i, 'voicemail', e.target.checked)} />
+                    “+ VM” — this call may leave the flow’s one voicemail
+                  </label>
+                )}
+                {stage.channel === 'linkedin' && (
+                  <label className="row small" style={{ gap: 8, marginBottom: 12 }}>
+                    <input type="checkbox" className="checkbox" checked={!!stage.linkedinInvite} disabled={!isAdmin}
+                      onChange={(e) => setStage(i, 'linkedinInvite', e.target.checked)} />
+                    Connection invite — counts toward the daily invite cap per rep
+                  </label>
+                )}
 
                 {stage.channel === 'email' && (
                   <Field label="Subject line">

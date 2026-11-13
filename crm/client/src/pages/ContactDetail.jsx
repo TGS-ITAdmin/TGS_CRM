@@ -40,6 +40,8 @@ export default function ContactDetail() {
   const [note, setNote] = useState('')
   const [noteType, setNoteType] = useState('note')
   const [noteChannel, setNoteChannel] = useState('')
+  const [replyType, setReplyType] = useState('positive')
+  const [restartDate, setRestartDate] = useState('')
   const [campaigns, setCampaigns] = useState([])
 
   const load = useCallback(async () => {
@@ -66,9 +68,18 @@ export default function ContactDetail() {
   async function saveNote() {
     if (!note.trim()) return
     try {
-      await api.addNote(contact._id, { body: note, type: noteType, channel: noteChannel || undefined })
+      const res = await api.addNote(contact._id, {
+        body: note, type: noteType, channel: noteChannel || undefined,
+        ...(noteType === 'reply_logged' ? { replyType, restartDate: restartDate || undefined } : {}),
+      })
       setNote('')
-      toast.success(noteType === 'reply_logged' ? 'Reply logged' : 'Note saved')
+      if (noteType !== 'reply_logged') toast.success('Note saved')
+      else {
+        const r = res.reply
+        toast.success(r && r.paused
+          ? `Reply logged · ${r.paused} flow${r.paused === 1 ? '' : 's'} paused${r.respondTask ? ' · Respond task created' : ''}`
+          : 'Reply logged')
+      }
       load()
     } catch (err) {
       toast.error(err.message)
@@ -115,6 +126,16 @@ export default function ContactDetail() {
       </div>
 
       <div className="page">
+        {contact.company?.locked && (
+          <div className="banner banner-warn">
+            <span>🔒</span>
+            <div>
+              <strong>{contact.company.name} is locked</strong> — {contact.company.lockReason || 'someone there replied or booked'}.
+              Other contacts there are paused and no one new can be enrolled.{' '}
+              <Link to={`/companies/${contact.company._id}`}>Open the company</Link> to clear it.
+            </div>
+          </div>
+        )}
         {(contact.status === statusRoles.lost || contact.nurture) && (
           <div className="banner banner-info">
             <span>ℹ</span>
@@ -123,6 +144,7 @@ export default function ContactDetail() {
                 <><strong>Lost</strong>{contact.lostReason ? ` — ${contact.lostReason}` : ''}. </>
               )}
               {contact.nurture && <><strong>Nurture is on</strong> — kept on the monthly nurture emails.</>}
+              {contact.restartDate && <> Check back on {new Date(contact.restartDate).toLocaleDateString()}.</>}
             </div>
           </div>
         )}
@@ -204,7 +226,11 @@ export default function ContactDetail() {
                               ? <Link to={`/campaigns/${e.campaign._id}`}>{e.campaign.name}</Link>
                               : <span className="faint">(deleted campaign)</span>}
                             {e.status !== 'active' && (
-                              <span className="tag" style={{ marginLeft: 8 }}>{e.status}</span>
+                              <span className="tag" style={{ marginLeft: 8 }}>
+                                {e.status === 'paused'
+                                  ? `paused — ${{ reply: 'they replied', company_lock: 'company locked', manual: 'by hand' }[e.pausedReason] || 'paused'}`
+                                  : e.status}
+                              </span>
                             )}
                           </div>
                           <div className="work-meta">
@@ -219,8 +245,24 @@ export default function ContactDetail() {
                             )}
                           </div>
                         </div>
+                        {e.status === 'paused' && (
+                          <div className="work-actions">
+                            <button className="btn btn-primary btn-sm"
+                              onClick={() => act(() => api.resumeFlow(contact._id, e._id), 'Flow resumed')}>
+                              Resume
+                            </button>
+                            <button className="btn btn-sm btn-ghost"
+                              onClick={() => act(() => api.exitEnrollment(e._id, 'Removed from the contact page'), 'Removed from campaign')}>
+                              Remove
+                            </button>
+                          </div>
+                        )}
                         {e.status === 'active' && (
                           <div className="work-actions">
+                            <button className="btn btn-sm"
+                              onClick={() => act(() => api.pauseFlow(contact._id, e._id), 'Flow paused')}>
+                              Pause
+                            </button>
                             <button className="btn btn-sm"
                               onClick={() => act(() => api.snoozeEnrollment(e._id, 7), 'Snoozed a week')}>
                               Snooze
@@ -257,6 +299,16 @@ export default function ContactDetail() {
                     <option value="reply_logged">They replied</option>
                   </select>
                   {noteType === 'reply_logged' && (
+                    <select className="select" style={{ maxWidth: 200 }} value={replyType}
+                      onChange={(e) => setReplyType(e.target.value)}>
+                      <option value="positive">Positive / interested</option>
+                      <option value="other">Question / other</option>
+                      <option value="not_now">Not now</option>
+                      <option value="not_interested">Not interested</option>
+                      <option value="unsubscribe">Stop / remove me</option>
+                    </select>
+                  )}
+                  {noteType === 'reply_logged' && (
                     <select className="select" style={{ maxWidth: 150 }} value={noteChannel}
                       onChange={(e) => setNoteChannel(e.target.value)}>
                       <option value="">Which channel?</option>
@@ -281,6 +333,24 @@ export default function ContactDetail() {
                     <span className="hint" style={{ margin: 0 }}>Pick a channel so the report can attribute it.</span>
                   )}
                 </div>
+                {noteType === 'reply_logged' && replyType === 'not_now' && (
+                  <div className="field" style={{ marginTop: 8, marginBottom: 0, maxWidth: 260 }}>
+                    <label className="label">Check back on (optional)</label>
+                    <input className="input" type="date" value={restartDate} onChange={(e) => setRestartDate(e.target.value)} />
+                    <div className="hint">Blank = in 90 days. Nurture is switched on.</div>
+                  </div>
+                )}
+                {noteType === 'reply_logged' && (
+                  <div className="hint" style={{ marginTop: 8 }}>
+                    {{
+                      positive: 'Pauses their flows, locks the company, and creates a Respond task due within 15 minutes (business hours).',
+                      other: 'Pauses their flows, locks the company, and creates a Respond task for the next business day.',
+                      not_now: 'Pauses their flows and locks the company. Nurture on, with the check-back date above.',
+                      not_interested: 'Lost (Not interested) with Nurture on; their flows end and the company is locked.',
+                      unsubscribe: 'Email status → Unsubscribed (no more email). Lost; their flows end and the company is locked.',
+                    }[replyType]}
+                  </div>
+                )}
               </div>
             </div>
 

@@ -14,6 +14,7 @@ const { currencyList } = require('../lib/money')
 const customFields = require('../lib/custom-fields')
 const { smtpStatus, verifySmtp } = require('../lib/mailer')
 const { suppressContactEverywhere, logActivity } = require('../lib/engine')
+const { getRules, clearRulesCache } = require('../lib/rules')
 const {
   markLost, REASON_UNSUBSCRIBED, STATUS_ROLES, ROLE_KEYS, statusList, statusForRole, EMAIL_STATUSES, DNC_STATUSES,
 } = require('../lib/lifecycle')
@@ -49,6 +50,8 @@ router.get('/bootstrap', async (req, res) => {
     statusRoleCatalogue: STATUS_ROLES.map(({ key, label }) => ({ key, label })),
     emailStatuses: EMAIL_STATUSES,
     dncStatuses: DNC_STATUSES,
+    // G12 status and the other account-level rules, for banners and hints.
+    outreachRules: await getRules(),
     quoteApproval: settings.quoteApproval || {},
     quoteStatuses: QUOTE_STATUSES,
     dealStages: stageList(settings),
@@ -122,6 +125,57 @@ router.put('/', requirePermission('settings.manage'), async (req, res) => {
   }
   const settings = await Settings.findOneAndUpdate({ key: 'global' }, { $set: update }, { new: true }).lean()
   res.json({ settings })
+})
+
+/* ---- Outreach rules (G5 G9 G10 G11 G12) ---- */
+router.get('/rules', async (req, res) => {
+  res.json({ rules: await getRules({ fresh: true }) })
+})
+
+router.put('/rules', requirePermission('settings.manage'), async (req, res) => {
+  const b = req.body || {}
+  const set = {}
+  if (b.businessTimezone !== undefined) {
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: String(b.businessTimezone) })
+      set['rules.businessTimezone'] = String(b.businessTimezone)
+    } catch {
+      return res.status(400).json({ error: 'Unknown time zone' })
+    }
+  }
+  if (Array.isArray(b.holidays)) {
+    set['rules.holidays'] = [...new Set(b.holidays.map(String).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)))].sort()
+  }
+  if (Array.isArray(b.callWindows)) {
+    const w = b.callWindows
+      .map((x) => ({ start: Math.round(Number(x.start)), end: Math.round(Number(x.end)) }))
+      .filter((x) => x.start >= 0 && x.end <= 24 && x.end > x.start)
+    if (!w.length) return res.status(400).json({ error: 'At least one call window is needed' })
+    set['rules.callWindows'] = w
+  }
+  if (b.touchCaps) {
+    for (const k of ['email', 'call', 'linkedin']) {
+      if (b.touchCaps[k] !== undefined) set[`rules.touchCaps.${k}`] = Math.max(0, Math.round(Number(b.touchCaps[k]) || 0))
+    }
+  }
+  if (b.linkedinInviteCap !== undefined) set['rules.linkedinInviteCap'] = Math.max(1, Math.round(Number(b.linkedinInviteCap) || 20))
+  await Settings.updateOne({ key: 'global' }, { $set: set }, { upsert: true })
+  clearRulesCache()
+  res.json({ rules: await getRules({ fresh: true }) })
+})
+
+/* G12: record (or withdraw) the compliance sign-off. Until it is recorded,
+ * cold flows create no email or call work. */
+router.post('/rules/compliance-signoff', requirePermission('settings.manage'), async (req, res) => {
+  const withdraw = req.body?.withdraw === true
+  const by = String(req.body?.by || req.user.name || '').trim().slice(0, 120)
+  await Settings.updateOne(
+    { key: 'global' },
+    { $set: { 'rules.complianceSignedOffAt': withdraw ? null : new Date(), 'rules.complianceSignedOffBy': withdraw ? '' : by } },
+    { upsert: true }
+  )
+  clearRulesCache()
+  res.json({ rules: await getRules({ fresh: true }) })
 })
 
 /* ---- Status clean-up ----

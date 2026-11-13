@@ -70,6 +70,28 @@ export default function CompanyDetail() {
       </div>
 
       <div className="page">
+        {company.locked && (
+          <div className="banner banner-warn">
+            <span>🔒</span>
+            <div style={{ flex: 1 }}>
+              <strong>Company locked</strong> — {company.lockReason || 'someone here replied or booked'}
+              {company.lockedAt && <> on {new Date(company.lockedAt).toLocaleDateString()}</>}.
+              Everyone else's flows here are paused and no one new can be enrolled.
+            </div>
+            {can('contacts.edit') && (
+              <button className="btn btn-sm"
+                onClick={async () => {
+                  try {
+                    const r = await api.unlockCompany(company._id)
+                    toast.success(`Unlocked${r.resumed ? ` · ${r.resumed} flow${r.resumed === 1 ? '' : 's'} resumed` : ''}`)
+                    load()
+                  } catch (err) { toast.error(err.message) }
+                }}>
+                Clear lock & resume
+              </button>
+            )}
+          </div>
+        )}
         <div className="grid grid-4" style={{ marginBottom: 18 }}>
           <div className="stat">
             <div className="stat-label">Contacts</div>

@@ -388,6 +388,13 @@ router.post('/:id/merge', requirePermission('records.merge'), async (req, res) =
 })
 
 /* Lightweight picker feed for company selectors. */
+/* G2: clear a company lock. Flows paused by the lock resume where they were. */
+router.post('/:id/unlock', requirePermission('contacts.edit'), async (req, res) => {
+  const { unlockCompany } = require('../lib/engine')
+  const result = await unlockCompany({ companyId: req.params.id, actorId: req.user._id, resume: req.body?.resume !== false })
+  res.json({ ok: true, ...result })
+})
+
 router.get('/search/quick', async (req, res) => {
   const q = (req.query.q || '').trim()
   const filter = q

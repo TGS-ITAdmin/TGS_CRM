@@ -3,10 +3,12 @@ const multer = require('multer')
 const { parse } = require('csv-parse/sync')
 const ExcelJS = require('exceljs')
 const {
-  Contact, Company, Activity, Enrollment, Task, OutboxMessage, Suppression,
+  Contact, Company, Activity, Enrollment, Task, OutboxMessage, Suppression, Campaign,
 } = require('../db')
 const { requireAuth, requirePermission, ownerScope } = require('../middleware/auth')
-const { logActivity, suppressContactEverywhere } = require('../lib/engine')
+const {
+  logActivity, suppressContactEverywhere, handleReply, lockCompany, pauseEnrollment, resumeEnrollment, materializeStage,
+} = require('../lib/engine')
 const {
   roleStatus, isLostStatus, applyLost, advanceStatus, statusList, statusForRole,
   REASON_UNSUBSCRIBED, EMAIL_STATUSES, DNC_STATUSES,
@@ -78,6 +80,15 @@ async function applySuppressionChanges(contact, body, actorId) {
     } else if (body.emailStatus === 'bounced') {
       await cancelChannelWork(contact._id, 'email', 'Email bounced')
       notes.push('Email status: Bounced — queued emails cancelled')
+      // G8: the email step they are on right now is swapped straight away;
+      // later email steps are swapped when they come due.
+      const running = await Enrollment.find({ contact: contact._id, status: 'active' })
+      for (const e of running) {
+        const campaign = await Campaign.findById(e.campaign)
+        if (campaign?.stages?.[e.currentStageIndex]?.channel === 'email') {
+          await materializeStage({ enrollment: e, campaign, contact, stageIndex: e.currentStageIndex, actorId })
+        }
+      }
     } else {
       contact.unsubscribedAt = null
       notes.push('Email status: Valid')
@@ -434,6 +445,8 @@ router.put('/:id', requirePermission('contacts.edit'), async (req, res) => {
     // Same handoff as a booked-meeting call outcome, for a manual status change.
     if (body.status === (await roleStatus('meeting_booked'))) {
       dealResult = await ensureDealForMeeting({ contact, actorId: req.user._id })
+      // G2: a booked meeting locks the company too.
+      await lockCompany({ contact, reason: `${contact.firstName || 'A contact'} booked a meeting`, actorId: req.user._id })
     }
   }
 
@@ -494,8 +507,14 @@ router.delete('/:id', requirePermission('contacts.delete'), async (req, res) => 
 router.post('/:id/notes', async (req, res) => {
   const contact = await Contact.findOne({ _id: req.params.id, ...ownerScope(req) })
   if (!contact) return res.status(404).json({ error: 'Contact not found' })
-  const { body, type, channel } = req.body || {}
+  const { body, type, channel, replyType, restartDate } = req.body || {}
   if (!body || !String(body).trim()) return res.status(400).json({ error: 'Note cannot be empty' })
+
+  const REPLY_LABEL = {
+    positive: 'Positive reply', other: 'Reply received', not_now: 'Reply: not now',
+    not_interested: 'Reply: not interested', unsubscribe: 'Reply: stop / remove me',
+  }
+  const kind = REPLY_LABEL[replyType] ? replyType : 'other'
 
   const activity = await logActivity({
     contact: contact._id,
@@ -503,13 +522,50 @@ router.post('/:id/notes', async (req, res) => {
     type: type === 'reply_logged' ? 'reply_logged' : 'note',
     channel: channel || '',
     user: req.user._id,
-    title: type === 'reply_logged' ? 'Reply received' : 'Note',
+    title: type === 'reply_logged' ? REPLY_LABEL[kind] : 'Note',
     body: String(body).trim(),
+    meta: type === 'reply_logged' ? { replyType: kind } : undefined,
   })
+
+  /* G1 + G2 + the outbound branch rules. Every reply pauses the contact's
+     flows and locks the company; what happens next depends on the reply. */
+  let replyResult = null
+  if (type === 'reply_logged') {
+    if (kind === 'positive' || kind === 'other') {
+      replyResult = await handleReply({ contact, positive: kind === 'positive', source: 'replied', actorId: req.user._id })
+    } else if (kind === 'not_now') {
+      // Nurture on, restart on their date or in 90 days; no Respond task needed.
+      replyResult = await handleReply({ contact, respond: false, source: 'replied (not now)', actorId: req.user._id })
+      const when = restartDate && !Number.isNaN(Date.parse(restartDate))
+        ? new Date(restartDate) : new Date(Date.now() + 90 * 86400000)
+      contact.nurture = true
+      contact.restartDate = when
+      await contact.save()
+    } else if (kind === 'not_interested') {
+      await lockCompany({ contact, reason: `${contact.firstName || 'A contact'} replied (not interested)`, actorId: req.user._id })
+      const lost = await applyLost(contact, { reason: 'Not interested', nurture: true })
+      await contact.save()
+      await suppressContactEverywhere({ contactId: contact._id, reason: 'Replied: not interested', actorId: req.user._id })
+      if (lost) {
+        await logActivity({
+          contact: contact._id, type: 'status_change', user: req.user._id,
+          title: `Status: ${lost.from} → ${lost.to} (Not interested)`, meta: { ...lost, automatic: true },
+        })
+      }
+    } else if (kind === 'unsubscribe') {
+      // G3: "stop", "no thanks", "remove me" — same as the unsubscribe link.
+      await lockCompany({ contact, reason: `${contact.firstName || 'A contact'} asked to stop`, actorId: req.user._id })
+      const result = await applySuppressionChanges(contact, { emailStatus: 'unsubscribed' }, req.user._id)
+      await contact.save()
+      for (const note of result.notes) {
+        await logActivity({ contact: contact._id, type: 'suppression_changed', user: req.user._id, title: note })
+      }
+    }
+  }
 
   // A logged reply is the signal the channel report hangs on, so nudge the
   // lifecycle forward if the contact is still at New or Contacted.
-  if (type === 'reply_logged') {
+  if (type === 'reply_logged' && (kind === 'positive' || kind === 'other' || kind === 'not_now')) {
     const moved = await advanceStatus(contact, 'replied', { from: ['created', 'contacted'] })
     if (moved) {
       await contact.save()
@@ -521,7 +577,7 @@ router.post('/:id/notes', async (req, res) => {
       })
     }
   }
-  res.status(201).json({ activity })
+  res.status(201).json({ activity, reply: replyResult })
 })
 
 /* ---- Bulk actions ---- */
@@ -1160,6 +1216,20 @@ router.get('/export/csv', requirePermission('contacts.export'), async (req, res)
   res.setHeader('Content-Type', 'text/csv')
   res.setHeader('Content-Disposition', 'attachment; filename="contacts.csv"')
   res.send(lines.join('\n'))
+})
+
+/* ---- Pause / resume a contact's flow by hand (G1 follow-up) ---- */
+router.post('/:id/enrollments/:enrollmentId/:action(pause|resume)', async (req, res) => {
+  const contact = await Contact.findOne({ _id: req.params.id, ...ownerScope(req) })
+  if (!contact) return res.status(404).json({ error: 'Contact not found' })
+  const enrollment = await Enrollment.findOne({ _id: req.params.enrollmentId, contact: contact._id })
+  if (!enrollment) return res.status(404).json({ error: 'Enrollment not found' })
+  if (req.params.action === 'pause') {
+    const ok = await pauseEnrollment({ enrollment, reason: 'manual', actorId: req.user._id })
+    if (!ok) return res.status(400).json({ error: 'Only a running flow can be paused' })
+    return res.json({ ok: true })
+  }
+  res.json(await resumeEnrollment({ enrollment, actorId: req.user._id }))
 })
 
 module.exports = router

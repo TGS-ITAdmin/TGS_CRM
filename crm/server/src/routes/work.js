@@ -3,7 +3,10 @@ const {
   Task, OutboxMessage, Contact, Enrollment, Quote, Activity, Campaign, CALL_OUTCOMES,
 } = require('../db')
 const { requireAuth, assignedScope, ownerScope } = require('../middleware/auth')
-const { logActivity, advance, enroll, suppressContactEverywhere } = require('../lib/engine')
+const {
+  logActivity, advance, enroll, suppressContactEverywhere, handleReply, lockCompany,
+} = require('../lib/engine')
+const rules = require('../lib/rules')
 const { sendMessage } = require('../lib/mailer')
 const { suppressionReason } = require('../lib/compliance')
 const { advanceStatus, markLost, REASON_NOT_INTERESTED, REASON_UNSUBSCRIBED } = require('../lib/lifecycle')
@@ -67,20 +70,49 @@ router.get('/my-day', async (req, res) => {
     ]),
   ])
 
+  // G13: more than 1 business day overdue is escalated.
+  const R = await rules.getRules()
+  const cutoff = rules.escalationCutoff(new Date(), R)
+  for (const t of overdueTasks) t.escalated = new Date(t.dueAt) < cutoff
+  const escalatedCount = overdueTasks.filter((t) => t.escalated).length
+
   res.json({
     dayStart,
+    escalationCutoff: cutoff,
     overdue: overdueTasks,
     today: todayTasks,
     upcoming: upcomingTasks,
     awaitingApproval: queuedEmails,
     counts: {
       overdue: counts[0],
+      escalated: escalatedCount,
       dueToday: counts[1],
       awaitingApproval: counts[2],
       completedToday: counts[3],
       quotesPendingApproval: counts[4],
     },
   })
+})
+
+/* ---- G13: team escalations, for the daily scoreboard ----
+ * Tasks more than 1 business day overdue, grouped by the person they are
+ * assigned to. Needs team-wide report access. */
+router.get('/escalations', async (req, res) => {
+  if (!req.can('reports.viewTeam')) return res.status(403).json({ error: 'Needs team-wide report access' })
+  const R = await rules.getRules()
+  const cutoff = rules.escalationCutoff(new Date(), R)
+  const tasks = await Task.find({ status: 'pending', dueAt: { $lt: cutoff }, ...(await notPaused()) })
+    .sort({ dueAt: 1 }).limit(500)
+    .populate('assignedTo', 'name').populate('contact', 'firstName lastName companyName').populate('campaign', 'name').lean()
+  const byOwner = new Map()
+  for (const t of tasks) {
+    const key = String(t.assignedTo?._id || 'none')
+    if (!byOwner.has(key)) byOwner.set(key, { owner: t.assignedTo?.name || 'Unassigned', count: 0, oldest: t.dueAt, tasks: [] })
+    const g = byOwner.get(key)
+    g.count++
+    if (g.tasks.length < 10) g.tasks.push({ _id: t._id, title: t.title, dueAt: t.dueAt, channel: t.channel, contact: t.contact, campaign: t.campaign?.name || '' })
+  }
+  res.json({ cutoff, total: tasks.length, owners: [...byOwner.values()].sort((a, b) => b.count - a.count) })
 })
 
 /* ---- Task list with filters ---- */
@@ -118,6 +150,7 @@ router.get('/call-list', async (req, res) => {
   // Local hour is computed here so every rep sees the same answer regardless
   // of their own machine clock.
   const now = new Date()
+  const callRules = await rules.getRules()
   const enriched = tasks
     .filter((t) => t.contact)
     .map((t) => {
@@ -136,11 +169,13 @@ router.get('/call-list', async (req, res) => {
         }
       }
       const inBusinessHours = localHour == null ? null : localHour >= 8 && localHour < 18
-      return { ...t, contactLocalTime: localTime, contactLocalHour: localHour, inBusinessHours }
+      // G5: inside the 9–11am / 4–6pm local call windows on a business day.
+      const inCallWindow = tz ? rules.inCallWindow(now, callRules, tz) : null
+      return { ...t, contactLocalTime: localTime, contactLocalHour: localHour, inBusinessHours, inCallWindow }
     })
 
   // Callable-now first, then unknown timezone, then out-of-hours.
-  const rank = (t) => (t.inBusinessHours === true ? 0 : t.inBusinessHours === null ? 1 : 2)
+  const rank = (t) => (t.inCallWindow === true ? 0 : t.inCallWindow === null ? 1 : 2)
   enriched.sort((a, b) => rank(a) - rank(b) || new Date(a.dueAt) - new Date(b.dueAt))
 
   res.json({ items: enriched, callOutcomes: CALL_OUTCOMES, checkedAt: now })
@@ -163,6 +198,12 @@ router.post('/tasks/:id/complete', async (req, res) => {
   }
   if (outcome && !outcomeMap.has(outcome) && task.channel === 'call') {
     return res.status(400).json({ error: 'Unknown call outcome' })
+  }
+  // G6: one voicemail per flow, and only on a "+ VM" step.
+  if (task.channel === 'call' && outcome === 'voicemail' && task.enrollment && !task.voicemailAllowed) {
+    return res.status(400).json({
+      error: 'No voicemail on this call — either this step is not a "+ VM" step or the flow\'s one voicemail is used. Log it as No Answer.',
+    })
   }
 
   task.status = 'done'
@@ -230,6 +271,26 @@ router.post('/tasks/:id/complete', async (req, res) => {
         contact: contact._id, type: 'suppression_changed', channel: 'call', user: req.user._id,
         title: 'Do-not-call request — calls stopped',
       })
+    }
+
+    // G6: the flow's one voicemail is now used.
+    if (outcome === 'voicemail' && task.enrollment) {
+      await Enrollment.updateOne({ _id: task.enrollment }, { $set: { voicemailLeft: true } })
+    }
+
+    /* G1 + G2: a real conversation pauses the contact's flows and locks the
+       company. A connected call gets a Respond task; a callback or a booked
+       meeting already has its next step. Not interested / don't call end the
+       flows above, but still lock the company. */
+    const who = contact.firstName || 'A contact'
+    if (outcome === 'connected') {
+      await handleReply({ contact, positive: false, source: 'answered a call', actorId: req.user._id })
+    } else if (outcome === 'callback_requested') {
+      await handleReply({ contact, respond: false, source: 'asked for a callback', actorId: req.user._id })
+    } else if (meta?.bookedMeeting) {
+      await handleReply({ contact, respond: false, source: 'booked a meeting', actorId: req.user._id })
+    } else if (outcome === 'not_interested' || outcome === 'do_not_call') {
+      await lockCompany({ contact, reason: `${who} spoke on a call (${outcome === 'do_not_call' ? "don't call" : 'not interested'})`, actorId: req.user._id })
     }
 
     for (const ch of statusChanges) {

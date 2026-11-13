@@ -62,6 +62,11 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
         <Channel value={task.channel} showLabel={false} />
         <div className="work-main">
           <div className="work-name truncate">
+            {task.escalated && (
+              <span className="tag" style={{ marginRight: 6, background: 'var(--danger)', color: '#fff' }}
+                title="More than 1 business day overdue">Escalated</span>
+            )}
+            {task.kind === 'respond' && <span className="tag" style={{ marginRight: 6 }}>Reply</span>}
             {fullName(contact)}
             {companyLabel && <span className="faint" style={{ fontWeight: 400 }}> · {companyLabel}</span>}
           </div>
@@ -121,7 +126,7 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
                 <label className="label">How did the call go?</label>
                 <select className="select" value={outcome} onChange={(e) => setOutcome(e.target.value)}>
                   <option value="">Pick an outcome…</option>
-                  {callOutcomes.map((o) => (
+                  {callOutcomes.filter((o) => o.value !== 'voicemail' || !task.enrollment || task.voicemailAllowed).map((o) => (
                     <option key={o.value} value={o.value}>{o.label}</option>
                   ))}
                 </select>
@@ -186,6 +191,16 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
           </div>
           {task.channel === 'call' && !outcome && (
             <div className="hint">Pick an outcome — it is what makes the cold-call report meaningful.</div>
+          )}
+          {task.channel === 'call' && task.enrollment && (
+            <div className="hint">
+              {task.voicemailAllowed
+                ? 'Voicemail: allowed on this call — it is the flow\u2019s one voicemail.'
+                : 'No voicemail on this call (not a “+ VM” step, or the flow\u2019s one voicemail is used). If no one answers, log No Answer.'}
+            </div>
+          )}
+          {task.swappedFrom === 'email' && (
+            <div className="hint">This replaces an email step: their email bounced.</div>
           )}
         </div>
       )}

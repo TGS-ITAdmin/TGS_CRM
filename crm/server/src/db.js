@@ -145,6 +145,24 @@ const DEFAULT_QUOTE_APPROVAL = {
 
 const settingsSchema = new Schema(
   {
+    /* Account-level outreach rules (G5 G9 G10 G11 G12). */
+    rules: {
+      businessTimezone: { type: String, default: 'America/New_York' },
+      holidays: { type: [String], default: () => ['2026-11-26', '2026-12-25', '2027-01-01'] },
+      callWindows: {
+        type: [{ start: Number, end: Number, _id: false }],
+        default: () => [{ start: 9, end: 11 }, { start: 16, end: 18 }],
+      },
+      touchCaps: {
+        email: { type: Number, default: 4 },
+        call: { type: Number, default: 3 },
+        linkedin: { type: Number, default: 2 },
+      },
+      linkedinInviteCap: { type: Number, default: 20 },
+      workdayStartHour: { type: Number, default: 9 },
+      complianceSignedOffAt: { type: Date, default: null },
+      complianceSignedOffBy: { type: String, default: '' },
+    },
     key: { type: String, default: 'global', unique: true },
     companyName: { type: String, default: 'TGS BPO' },
     // CAN-SPAM requires a valid physical postal address in every commercial
@@ -209,6 +227,12 @@ const companySchema = new Schema(
     // Normalised email domain — the dedupe key that actually works.
     domain: { type: String, trim: true, lowercase: true, default: '' },
     website: { type: String, trim: true, default: '' },
+    /* Company lock (G2): someone here replied or booked, so everyone else's
+       flows are paused and no one new is enrolled until it is cleared. */
+    locked: { type: Boolean, default: false, index: true },
+    lockedAt: { type: Date, default: null },
+    lockedBy: { type: Schema.Types.ObjectId, ref: 'Contact', default: null },
+    lockReason: { type: String, default: '' },
     industry: { type: String, trim: true, default: '' },
     employeeCount: { type: String, trim: true, default: '' },
     phone: { type: String, trim: true, default: '' },
@@ -285,6 +309,8 @@ const contactSchema = new Schema(
     lostReason: { type: String, default: '' },
     // Nurture is a flag, not a status: a contact can be Lost and in Nurture.
     nurture: { type: Boolean, default: false, index: true },
+    // "Not now": when to pick them up again (default +90 days).
+    restartDate: { type: Date, default: null },
     unsubscribeToken: {
       type: String,
       default: () => crypto.randomBytes(24).toString('hex'),
@@ -355,6 +381,10 @@ const stageSchema = new Schema({
   body: { type: String, default: '' },
   // Days to wait after entering this stage before the contact is due to move on.
   waitDays: { type: Number, default: 3, min: 0 },
+  // Call stages: this step may leave the flow's one voicemail (G6, "+ VM").
+  voicemail: { type: Boolean, default: false },
+  // LinkedIn stages: a connection invite, counted toward the daily cap (G10).
+  linkedinInvite: { type: Boolean, default: false },
 })
 
 const campaignSchema = new Schema(
@@ -367,6 +397,11 @@ const campaignSchema = new Schema(
     /* Optional follow-up after someone finishes the campaign with no
        response: a check task N days later (e.g. F2: "is the job post still
        open?"). Answering "yes" puts them back into this same campaign. */
+    /* Cold flow (F1–F3 style): held by the compliance gate (G12) and
+       limited by touch caps (G9). */
+    cold: { type: Boolean, default: false },
+    // Waits count Mon–Fri, skipping holidays (G11). Off = calendar days.
+    businessDays: { type: Boolean, default: true },
     recheck: {
       enabled: { type: Boolean, default: false },
       days: { type: Number, default: 30, min: 1 },
@@ -400,10 +435,20 @@ const enrollmentSchema = new Schema(
     currentStageIndex: { type: Number, default: 0 },
     status: {
       type: String,
-      enum: ['active', 'completed', 'exited'],
+      // 'paused': stopped by a reply (G1) or a company lock (G2) until resumed.
+      enum: ['active', 'paused', 'completed', 'exited'],
       default: 'active',
       index: true,
     },
+    pausedReason: { type: String, enum: ['', 'reply', 'company_lock', 'manual'], default: '' },
+    pausedAt: { type: Date, default: null },
+    // Touches created in this flow (G9 caps) and the one voicemail (G6).
+    touches: {
+      email: { type: Number, default: 0 },
+      call: { type: Number, default: 0 },
+      linkedin: { type: Number, default: 0 },
+    },
+    voicemailLeft: { type: Boolean, default: false },
     enteredStageAt: { type: Date, default: Date.now },
     // When the stage engine should advance this contact. Null = waiting on a human.
     dueAt: { type: Date, default: null, index: true },
@@ -445,7 +490,14 @@ const taskSchema = new Schema(
     channel: { type: String, enum: [...CHANNELS, 'internal'], required: true },
     title: { type: String, required: true },
     // 'recheck': the after-campaign check; finishing it can re-enrol.
-    kind: { type: String, enum: ['', 'recheck'], default: '' },
+    // 'respond': answer a reply (G1).
+    kind: { type: String, enum: ['', 'recheck', 'respond'], default: '' },
+    // Call tasks: whether this call may leave the flow's one voicemail (G6).
+    voicemailAllowed: { type: Boolean, default: false },
+    // LinkedIn connection invite, counted toward the daily cap (G10).
+    linkedinInvite: { type: Boolean, default: false, index: true },
+    // Set when an email step became this call/LinkedIn task after a bounce (G8).
+    swappedFrom: { type: String, default: '' },
     // The stage script with merge fields already resolved, ready to use.
     scriptBody: { type: String, default: '' },
     assignedTo: { type: Schema.Types.ObjectId, ref: 'User', index: true },
@@ -880,6 +932,10 @@ const ACTIVITY_TYPES = [
   'dnc_added',
   'step_skipped',
   'recheck_logged',
+  'flow_paused',
+  'flow_resumed',
+  'company_locked',
+  'company_unlocked',
   'suppression_changed',
   'campaign_paused',
   'reply_logged',

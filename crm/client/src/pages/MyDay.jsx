@@ -20,7 +20,8 @@ function Section({ title, count, hot, children, empty }) {
 }
 
 export default function MyDay({ counts }) {
-  const { user, smtp } = useAuth()
+  const { user, smtp, can } = useAuth()
+  const [team, setTeam] = useState(null)
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [notifState, setNotifState] = useState(notificationPermission())
@@ -34,6 +35,10 @@ export default function MyDay({ counts }) {
   }, [])
 
   useEffect(() => { load() }, [load])
+  // G13: the team's tasks more than 1 business day overdue, for managers.
+  useEffect(() => {
+    if (can('reports.viewTeam')) api.escalations().then(setTeam).catch(() => {})
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (loading) return <Loading />
   if (!data) return null
@@ -95,7 +100,7 @@ export default function MyDay({ counts }) {
           <div className={`stat${c.overdue ? ' hot' : ''}`}>
             <div className="stat-label">Overdue</div>
             <div className="stat-value">{num(c.overdue)}</div>
-            <div className="stat-sub">past their due date</div>
+            <div className="stat-sub">{c.escalated ? `${num(c.escalated)} escalated (1+ business day)` : 'past their due date'}</div>
           </div>
           <div className="stat">
             <div className="stat-label">Due today</div>
@@ -123,6 +128,30 @@ export default function MyDay({ counts }) {
                 <Link className="btn btn-sm" to="/campaigns">Manage campaigns</Link>
               </div>
             </Empty>
+          </div>
+        )}
+
+        {team && team.total > 0 && (
+          <div className="card" style={{ marginBottom: 18 }}>
+            <div className="card-head">
+              <h2 style={{ flex: 1 }}>Team escalations</h2>
+              <span className="small faint">Tasks more than 1 business day overdue</span>
+            </div>
+            <div className="table-wrap">
+              <table className="data">
+                <thead><tr><th>Owner</th><th className="num">Escalated</th><th>Oldest</th><th>Examples</th></tr></thead>
+                <tbody>
+                  {team.owners.map((o) => (
+                    <tr key={o.owner}>
+                      <td><strong>{o.owner}</strong></td>
+                      <td className="num" style={{ color: 'var(--danger)' }}>{o.count}</td>
+                      <td className="nowrap small">{new Date(o.oldest).toLocaleDateString()}</td>
+                      <td className="small">{o.tasks.slice(0, 3).map((t) => t.title).join(' · ')}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 
