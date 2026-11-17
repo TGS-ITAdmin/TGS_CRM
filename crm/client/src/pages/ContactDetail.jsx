@@ -71,7 +71,8 @@ export default function ContactDetail() {
 
   useEffect(() => { load() }, [load])
   useEffect(() => {
-    api.listCampaigns({ active: 'true' }).then((d) => setCampaigns(d.campaigns)).catch(() => {})
+    // All campaigns, paused included: the picker marks paused ones and greys out unusable ones.
+    api.listCampaigns().then((d) => setCampaigns(d.campaigns)).catch(() => {})
   }, [])
 
   if (loading) return <Loading />
