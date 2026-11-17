@@ -7,9 +7,10 @@ const {
   logActivity, advance, enroll, suppressContactEverywhere, handleReply, lockCompany,
 } = require('../lib/engine')
 const rules = require('../lib/rules')
+const { applyOutcome, findOutcome } = require('../lib/outcomes')
 const { sendMessage } = require('../lib/mailer')
 const { suppressionReason } = require('../lib/compliance')
-const { advanceStatus, markLost, REASON_NOT_INTERESTED, REASON_UNSUBSCRIBED } = require('../lib/lifecycle')
+const { advanceStatus } = require('../lib/lifecycle')
 const { ensureDealForMeeting } = require('../lib/deals')
 const { startOfDay, endOfDay } = require('../lib/time')
 
@@ -92,6 +93,108 @@ router.get('/my-day', async (req, res) => {
       quotesPendingApproval: counts[4],
     },
   })
+})
+
+/* ---- Waiting on a reply ----
+ * Email and LinkedIn steps that went out before today, where the contact is
+ * still on that stage and no reply has been logged since. Reps log the
+ * outcome here (or "No reply yet", which hides the row for a day). */
+router.get('/waiting-replies', async (req, res) => {
+  const R = await rules.getRules()
+  const { start } = rules.dayBounds(new Date(), R)
+  const since = new Date(Date.now() - 30 * 86400000)
+  const scope = assignedScope(req)
+  const [emails, linkedin] = await Promise.all([
+    OutboxMessage.find({ ...scope, status: 'sent', sentAt: { $gte: since, $lt: start }, enrollment: { $ne: null } })
+      .select('contact enrollment campaign stageIndex stageName sentAt subject').sort({ sentAt: -1 }).limit(500).lean(),
+    Task.find({ ...scope, status: 'done', channel: 'linkedin', completedAt: { $gte: since, $lt: start }, enrollment: { $ne: null } })
+      .select('contact enrollment campaign stageIndex stageName completedAt').sort({ completedAt: -1 }).limit(500).lean(),
+  ])
+  const seen = new Set()
+  const candidates = []
+  for (const x of [
+    ...emails.map((m) => ({ channel: 'email', at: m.sentAt, what: m.subject, ...m })),
+    ...linkedin.map((t) => ({ channel: 'linkedin', at: t.completedAt, what: t.stageName, ...t })),
+  ]) {
+    const k = `${x.enrollment}:${x.stageIndex}`
+    if (seen.has(k)) continue
+    seen.add(k)
+    candidates.push(x)
+  }
+  if (!candidates.length) return res.json({ items: [] })
+
+  const enrollments = await Enrollment.find({
+    _id: { $in: candidates.map((c) => c.enrollment) }, status: 'active', ...(await notPaused()),
+  }).select('currentStageIndex replyCheckedAt').lean()
+  const byId = new Map(enrollments.map((e) => [String(e._id), e]))
+  const dayAgo = Date.now() - 86400000
+  const live = candidates.filter((c) => {
+    const e = byId.get(String(c.enrollment))
+    if (!e || e.currentStageIndex !== c.stageIndex) return false
+    return !(e.replyCheckedAt && new Date(e.replyCheckedAt).getTime() > dayAgo)
+  })
+  const replies = await Activity.find({
+    contact: { $in: live.map((c) => c.contact) }, type: 'reply_logged', createdAt: { $gte: since },
+  }).select('contact createdAt').lean()
+  const lastReply = new Map()
+  for (const r of replies) {
+    const k = String(r.contact)
+    if (!lastReply.has(k) || r.createdAt > lastReply.get(k)) lastReply.set(k, r.createdAt)
+  }
+  const waiting = live.filter((c) => !(lastReply.get(String(c.contact)) > c.at))
+  const [contacts, campaigns] = await Promise.all([
+    Contact.find({ _id: { $in: waiting.map((c) => c.contact) } }).select('firstName lastName companyName company').populate('company', 'name').lean(),
+    Campaign.find({ _id: { $in: waiting.map((c) => c.campaign) } }).select('name').lean(),
+  ])
+  const cById = new Map(contacts.map((c) => [String(c._id), c]))
+  const campById = new Map(campaigns.map((c) => [String(c._id), c]))
+  res.json({
+    items: waiting
+      .filter((c) => cById.has(String(c.contact)))
+      .sort((a, b) => new Date(a.at) - new Date(b.at))
+      .slice(0, 100)
+      .map((c) => ({
+        enrollmentId: c.enrollment, channel: c.channel, at: c.at, what: c.what || '',
+        stageName: c.stageName || '', contact: cById.get(String(c.contact)),
+        campaign: campById.get(String(c.campaign)) ? { _id: c.campaign, name: campById.get(String(c.campaign)).name } : null,
+      })),
+  })
+})
+
+router.post('/waiting-replies/:enrollmentId/checked', async (req, res) => {
+  const e = await Enrollment.findById(req.params.enrollmentId)
+  if (!e) return res.status(404).json({ error: 'Not found' })
+  const contact = await Contact.findOne({ _id: e.contact, ...ownerScope(req) }).select('_id').lean()
+  if (!contact) return res.status(403).json({ error: 'That contact is not yours' })
+  e.replyCheckedAt = new Date()
+  await e.save()
+  res.json({ ok: true })
+})
+
+/* ---- "What happens next?" for an outcome, before it is logged ----
+ * A dry run of the outcome engine: the same code that will run, describing
+ * each effect instead of doing it. `destructive` drives the confirmation. */
+router.post('/outcome-preview', async (req, res) => {
+  const { taskId, contactId, enrollmentId, channel, outcome, restartDate, person } = req.body || {}
+  let ch = channel
+  let enrollment = null
+  let contact = null
+  if (taskId) {
+    const task = await Task.findOne({ _id: taskId, ...assignedScope(req) }).lean()
+    if (!task) return res.status(404).json({ error: 'Task not found' })
+    ch = task.channel
+    contact = await Contact.findById(task.contact)
+    if (task.enrollment) enrollment = await Enrollment.findById(task.enrollment)
+  } else {
+    contact = await Contact.findById(contactId)
+    if (enrollmentId) enrollment = await Enrollment.findOne({ _id: enrollmentId, contact: contactId })
+  }
+  if (!contact) return res.status(404).json({ error: 'Contact not found' })
+  if (!findOutcome(ch, outcome)) return res.json({ plan: [], destructive: false })
+  const r = await applyOutcome({
+    contact, channel: ch, outcome, enrollment, data: { restartDate, person }, actorId: req.user._id, dryRun: true,
+  })
+  res.json({ plan: r.plan, destructive: r.destructive, customised: !!r.branch })
 })
 
 /* ---- G13: team escalations, for the daily scoreboard ----
@@ -187,8 +290,9 @@ router.post('/tasks/:id/complete', async (req, res) => {
   if (!task) return res.status(404).json({ error: 'Task not found' })
   if (task.status !== 'pending') return res.status(400).json({ error: 'That task is already closed' })
 
-  const { outcome, notes, callbackDays, advanceNow } = req.body || {}
+  const { outcome, notes, callbackDays, advanceNow, person, restartDate } = req.body || {}
   let dealResult = null
+  let outcomeResult = null
 
   // The after-campaign re-check has its own answer instead of an outcome.
   if (task.kind === 'recheck') return completeRecheck(req, res, task)
@@ -198,6 +302,10 @@ router.post('/tasks/:id/complete', async (req, res) => {
   }
   if (outcome && !outcomeMap.has(outcome) && task.channel === 'call') {
     return res.status(400).json({ error: 'Unknown call outcome' })
+  }
+  // LinkedIn tasks may say what happened (optional): invite accepted, a reply…
+  if (outcome && task.channel === 'linkedin' && !findOutcome('linkedin', outcome)) {
+    return res.status(400).json({ error: 'Unknown LinkedIn outcome' })
   }
   // G6: one voicemail per flow, and only on a "+ VM" step.
   if (task.channel === 'call' && outcome === 'voicemail' && task.enrollment && !task.voicemailAllowed) {
@@ -225,7 +333,7 @@ router.post('/tasks/:id/complete', async (req, res) => {
       outcome: outcome || '',
       title: task.channel === 'call'
         ? `Call — ${outcomeMap.get(outcome)?.label || outcome}`
-        : `LinkedIn — ${task.stageName || 'message sent'}`,
+        : `LinkedIn — ${task.stageName || 'message sent'}${outcome ? ` · ${findOutcome('linkedin', outcome)?.label || outcome}` : ''}`,
       // Store what was actually used, not a pointer to a template that may change.
       body: [task.scriptBody, notes ? `\n\nNotes: ${notes}` : ''].filter(Boolean).join(''),
     })
@@ -243,54 +351,20 @@ router.post('/tasks/:id/complete', async (req, res) => {
     }
     await contact.save()
 
-    /* Not interested: Lost with that reason, and Nurture on. Their current
-       campaigns end, but they are NOT suppressed — the monthly nurture emails
-       still reach them. */
-    if (outcome === 'not_interested') {
-      const lost = await markLost(contact, { reason: REASON_NOT_INTERESTED, nurture: true })
-      if (lost) statusChanges.push({ ...lost, why: REASON_NOT_INTERESTED })
-      await suppressContactEverywhere({
-        contactId: contact._id,
-        reason: 'Not interested (call)',
-        actorId: req.user._id,
-      })
-    }
-
-    /* "Don't call again": a do-not-call request. Calls stop for good; the
-       contact is Lost (Unsubscribed / do-not-contact) and their campaigns end. */
-    if (outcome === 'do_not_call') {
-      contact.dncStatus = 'dnc_request'
-      const lost = await markLost(contact, { reason: REASON_UNSUBSCRIBED })
-      if (lost) statusChanges.push({ ...lost, why: 'do-not-call request' })
-      await suppressContactEverywhere({
-        contactId: contact._id,
-        reason: 'Do-not-call request',
-        actorId: req.user._id,
-      })
-      await logActivity({
-        contact: contact._id, type: 'suppression_changed', channel: 'call', user: req.user._id,
-        title: 'Do-not-call request — calls stopped',
-      })
-    }
-
     // G6: the flow's one voicemail is now used.
     if (outcome === 'voicemail' && task.enrollment) {
       await Enrollment.updateOne({ _id: task.enrollment }, { $set: { voicemailLeft: true } })
     }
 
-    /* G1 + G2: a real conversation pauses the contact's flows and locks the
-       company. A connected call gets a Respond task; a callback or a booked
-       meeting already has its next step. Not interested / don't call end the
-       flows above, but still lock the company. */
-    const who = contact.firstName || 'A contact'
-    if (outcome === 'connected') {
-      await handleReply({ contact, positive: false, source: 'answered a call', actorId: req.user._id })
-    } else if (outcome === 'callback_requested') {
-      await handleReply({ contact, respond: false, source: 'asked for a callback', actorId: req.user._id })
-    } else if (meta?.bookedMeeting) {
-      await handleReply({ contact, respond: false, source: 'booked a meeting', actorId: req.user._id })
-    } else if (outcome === 'not_interested' || outcome === 'do_not_call') {
-      await lockCompany({ contact, reason: `${who} spoke on a call (${outcome === 'do_not_call' ? "don't call" : 'not interested'})`, actorId: req.user._id })
+    /* What happens next: the global rules for this outcome, then the stage's
+       branch — or, if nobody customised it, the built-in default (the CRM's
+       behaviour before branches). Applies to this task's campaign only. */
+    if (outcome && (task.channel === 'call' || task.channel === 'linkedin')) {
+      const enrollment = task.enrollment ? await Enrollment.findById(task.enrollment) : null
+      outcomeResult = await applyOutcome({
+        contact, channel: task.channel, outcome, enrollment,
+        data: { person, restartDate }, actorId: req.user._id, stepOwner: task.assignedTo,
+      })
     }
 
     for (const ch of statusChanges) {
@@ -339,7 +413,7 @@ router.post('/tasks/:id/complete', async (req, res) => {
     }
   }
 
-  res.json({ ok: true, task, callbackTask, advanced, deal: dealResult })
+  res.json({ ok: true, task, callbackTask, advanced, deal: dealResult, next: outcomeResult?.plan || [] })
 })
 
 /* Answer to an after-campaign re-check, e.g. F2's "is the job post still open?"

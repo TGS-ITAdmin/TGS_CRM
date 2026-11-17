@@ -41,102 +41,9 @@ const lostReasonRequired = (res) => res.status(400).json({
   code: 'lost_reason_required',
 })
 
-/* Stop one channel's pending work for a contact: queued emails, or open
- * call tasks. Used when an email or call status blocks that channel. */
-async function cancelChannelWork(contactId, channel, reason) {
-  if (channel === 'email') {
-    const r = await OutboxMessage.updateMany(
-      { contact: contactId, status: 'queued' },
-      { $set: { status: 'cancelled', error: reason } }
-    )
-    return r.modifiedCount || 0
-  }
-  const r = await Task.updateMany(
-    { contact: contactId, status: 'pending', channel },
-    { $set: { status: 'cancelled', notes: reason } }
-  )
-  return r.modifiedCount || 0
-}
+const { cancelChannelWork, applySuppressionChanges } = require('../lib/suppression')
+const { applyOutcome, findOutcome } = require('../lib/outcomes')
 
-/* Apply emailStatus / dncStatus / doNotContact changes from a form or bulk
- * edit. Returns notes for the timeline. The contact is not saved here.
- *  - Unsubscribed (email) or a do-not-call request: Lost with reason
- *    "Unsubscribed / do-not-contact", and their campaigns end.
- *  - Bounced: queued emails cancelled; the campaign carries on.
- *  - On National DNC / reassigned: open call tasks cancelled; email and
- *    LinkedIn carry on. */
-async function applySuppressionChanges(contact, body, actorId) {
-  const notes = []
-  let endCampaigns = null
-
-  if (body.emailStatus !== undefined && EMAIL_STATUS_VALUES.includes(body.emailStatus)
-      && body.emailStatus !== (contact.emailStatus || 'valid')) {
-    contact.emailStatus = body.emailStatus
-    if (body.emailStatus === 'unsubscribed') {
-      contact.unsubscribedAt = contact.unsubscribedAt || new Date()
-      await cancelChannelWork(contact._id, 'email', 'Unsubscribed')
-      endCampaigns = 'Unsubscribed from email'
-      notes.push('Email status: Unsubscribed — emails stopped')
-    } else if (body.emailStatus === 'bounced') {
-      await cancelChannelWork(contact._id, 'email', 'Email bounced')
-      notes.push('Email status: Bounced — queued emails cancelled')
-      // G8: the email step they are on right now is swapped straight away;
-      // later email steps are swapped when they come due.
-      const running = await Enrollment.find({ contact: contact._id, status: 'active' })
-      for (const e of running) {
-        const campaign = await Campaign.findById(e.campaign)
-        if (campaign?.stages?.[e.currentStageIndex]?.channel === 'email') {
-          await materializeStage({ enrollment: e, campaign, contact, stageIndex: e.currentStageIndex, actorId })
-        }
-      }
-    } else {
-      contact.unsubscribedAt = null
-      notes.push('Email status: Valid')
-    }
-  }
-
-  if (body.dncStatus !== undefined && DNC_STATUS_VALUES.includes(body.dncStatus)
-      && body.dncStatus !== (contact.dncStatus || 'clear')) {
-    contact.dncStatus = body.dncStatus
-    const label = DNC_STATUSES.find((d) => d.value === body.dncStatus).label
-    if (body.dncStatus === 'clear') {
-      notes.push('DNC status: Clear')
-    } else {
-      await cancelChannelWork(contact._id, 'call', `Calls blocked: ${label}`)
-      notes.push(`DNC status: ${label} — calls stopped`)
-      if (body.dncStatus === 'dnc_request') endCampaigns = 'Do-not-call request'
-    }
-  }
-
-  if (body.doNotContact !== undefined && !!body.doNotContact !== !!contact.doNotContact) {
-    contact.doNotContact = !!body.doNotContact
-    if (contact.doNotContact) {
-      await Suppression.updateOne(
-        { email: contact.email || '', linkedinUrl: contact.linkedinUrl || '' },
-        {
-          $set: {
-            email: contact.email || '',
-            linkedinUrl: contact.linkedinUrl || '',
-            reason: 'flagged on contact',
-            addedBy: actorId,
-          },
-        },
-        { upsert: true }
-      )
-      endCampaigns = 'Flagged do-not-contact'
-      notes.push('Flagged do not contact — all outreach stopped')
-    } else {
-      notes.push('Do-not-contact flag removed')
-    }
-  }
-
-  let lostChange = null
-  if (endCampaigns) {
-    lostChange = await applyLost(contact, { reason: REASON_UNSUBSCRIBED })
-    await suppressContactEverywhere({ contactId: contact._id, reason: endCampaigns, actorId })
-  }
-  return { notes, lostChange }
-}
 
 // Company-level fields a contact form or CSV may also carry.
 const COMPANY_FIELDS = [
@@ -507,65 +414,56 @@ router.delete('/:id', requirePermission('contacts.delete'), async (req, res) => 
 router.post('/:id/notes', async (req, res) => {
   const contact = await Contact.findOne({ _id: req.params.id, ...ownerScope(req) })
   if (!contact) return res.status(404).json({ error: 'Contact not found' })
-  const { body, type, channel, replyType, restartDate } = req.body || {}
+  const { body, type, channel, replyType, restartDate, outcome, enrollmentId, person } = req.body || {}
   if (!body || !String(body).trim()) return res.status(400).json({ error: 'Note cannot be empty' })
 
-  const REPLY_LABEL = {
-    positive: 'Positive reply', other: 'Reply received', not_now: 'Reply: not now',
-    not_interested: 'Reply: not interested', unsubscribe: 'Reply: stop / remove me',
+  /* A logged reply carries an outcome for its channel (email, LinkedIn or
+     call). Older screens send `replyType` (positive, other, not_now,
+     not_interested, unsubscribe); those map onto the same outcomes. */
+  let ch = ['email', 'linkedin', 'call'].includes(channel) ? channel : 'email'
+  let key = outcome
+  if (type === 'reply_logged' && !findOutcome(ch, key)) {
+    const legacy = ['positive', 'other', 'not_now', 'not_interested', 'unsubscribe'].includes(replyType) ? replyType : 'other'
+    if (ch === 'linkedin' && legacy !== 'unsubscribe') key = `replied_${legacy}`
+    else if (ch === 'call') key = { positive: 'connected', other: 'connected', not_now: 'not_now', not_interested: 'not_interested', unsubscribe: 'do_not_call' }[legacy]
+    else { ch = 'email'; key = legacy }
   }
-  const kind = REPLY_LABEL[replyType] ? replyType : 'other'
+  const def = type === 'reply_logged' ? findOutcome(ch, key) : null
 
   const activity = await logActivity({
     contact: contact._id,
     company: contact.company || null,
     type: type === 'reply_logged' ? 'reply_logged' : 'note',
-    channel: channel || '',
+    channel: type === 'reply_logged' ? ch : (channel || ''),
     user: req.user._id,
-    title: type === 'reply_logged' ? REPLY_LABEL[kind] : 'Note',
+    title: def ? `Reply: ${def.label}` : 'Note',
     body: String(body).trim(),
-    meta: type === 'reply_logged' ? { replyType: kind } : undefined,
+    meta: def ? { replyType: key } : undefined,
   })
 
-  /* G1 + G2 + the outbound branch rules. Every reply pauses the contact's
-     flows and locks the company; what happens next depends on the reply. */
+  /* Global rules first (G1 stop on reply, G2 company lock, G3/G4/G8), then
+     the branch of the campaign the reply belongs to — or the built-in
+     default when that stage has no customised branch. */
   let replyResult = null
-  if (type === 'reply_logged') {
-    if (kind === 'positive' || kind === 'other') {
-      replyResult = await handleReply({ contact, positive: kind === 'positive', source: 'replied', actorId: req.user._id })
-    } else if (kind === 'not_now') {
-      // Nurture on, restart on their date or in 90 days; no Respond task needed.
-      replyResult = await handleReply({ contact, respond: false, source: 'replied (not now)', actorId: req.user._id })
-      const when = restartDate && !Number.isNaN(Date.parse(restartDate))
-        ? new Date(restartDate) : new Date(Date.now() + 90 * 86400000)
-      contact.nurture = true
-      contact.restartDate = when
-      await contact.save()
-    } else if (kind === 'not_interested') {
-      await lockCompany({ contact, reason: `${contact.firstName || 'A contact'} replied (not interested)`, actorId: req.user._id })
-      const lost = await applyLost(contact, { reason: 'Not interested', nurture: true })
-      await contact.save()
-      await suppressContactEverywhere({ contactId: contact._id, reason: 'Replied: not interested', actorId: req.user._id })
-      if (lost) {
-        await logActivity({
-          contact: contact._id, type: 'status_change', user: req.user._id,
-          title: `Status: ${lost.from} → ${lost.to} (Not interested)`, meta: { ...lost, automatic: true },
-        })
-      }
-    } else if (kind === 'unsubscribe') {
-      // G3: "stop", "no thanks", "remove me" — same as the unsubscribe link.
-      await lockCompany({ contact, reason: `${contact.firstName || 'A contact'} asked to stop`, actorId: req.user._id })
-      const result = await applySuppressionChanges(contact, { emailStatus: 'unsubscribed' }, req.user._id)
-      await contact.save()
-      for (const note of result.notes) {
-        await logActivity({ contact: contact._id, type: 'suppression_changed', user: req.user._id, title: note })
-      }
+  let plan = []
+  if (def) {
+    let enrollment = null
+    if (enrollmentId) enrollment = await Enrollment.findOne({ _id: enrollmentId, contact: contact._id })
+    if (!enrollment) {
+      const running = await Enrollment.find({ contact: contact._id, status: { $in: ['active', 'paused'] } })
+      if (running.length === 1) enrollment = running[0]
     }
+    const result = await applyOutcome({
+      contact, channel: ch, outcome: key, enrollment, data: { restartDate, person }, actorId: req.user._id,
+    })
+    replyResult = result.replyResult
+    plan = result.plan
   }
 
   // A logged reply is the signal the channel report hangs on, so nudge the
   // lifecycle forward if the contact is still at New or Contacted.
-  if (type === 'reply_logged' && (kind === 'positive' || kind === 'other' || kind === 'not_now')) {
+  const REPLIED = ['positive', 'other', 'not_now', 'replied_positive', 'replied_other', 'replied_not_now']
+  if (def && REPLIED.includes(key)) {
     const moved = await advanceStatus(contact, 'replied', { from: ['created', 'contacted'] })
     if (moved) {
       await contact.save()
@@ -577,7 +475,7 @@ router.post('/:id/notes', async (req, res) => {
       })
     }
   }
-  res.status(201).json({ activity, reply: replyResult })
+  res.status(201).json({ activity, reply: replyResult, next: plan })
 })
 
 /* ---- Bulk actions ---- */

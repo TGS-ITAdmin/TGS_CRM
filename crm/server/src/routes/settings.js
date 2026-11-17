@@ -52,6 +52,8 @@ router.get('/bootstrap', async (req, res) => {
     dncStatuses: DNC_STATUSES,
     // G12 status and the other account-level rules, for banners and hints.
     outreachRules: await getRules(),
+    // Outcomes per channel, with their default behaviour and allowed paths.
+    outcomeCatalogue: require('../lib/outcomes').catalogueForClient(),
     quoteApproval: settings.quoteApproval || {},
     quoteStatuses: QUOTE_STATUSES,
     dealStages: stageList(settings),

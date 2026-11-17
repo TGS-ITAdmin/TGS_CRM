@@ -40,6 +40,10 @@ const CALL_OUTCOMES = [
   { value: 'meeting_booked', label: 'Meeting Booked', positive: true, bookedMeeting: true },
   // Asked not to be called again: stops calls only (email and LinkedIn may continue elsewhere).
   { value: 'do_not_call', label: "Don't call again" },
+  // Someone else should get this outreach: the rep gives the right name.
+  { value: 'wrong_person', label: 'Wrong person' },
+  // Interested later: the rep gives a check-back date.
+  { value: 'not_now', label: 'Not now' },
 ]
 
 /* ------------------------------------------------------------------ */
@@ -372,6 +376,32 @@ suppressionSchema.index({ linkedinUrl: 1 })
 /* Campaign                                                             */
 /* ------------------------------------------------------------------ */
 
+/* What happens on one outcome at one stage (a "branch"). Stored only when an
+ * admin customises it; an outcome with no branch keeps the built-in default,
+ * which is the CRM's behaviour before branches existed. */
+const branchSchema = new Schema(
+  {
+    outcome: { type: String, required: true },
+    // stay: no change · continue: next stage now · jump: a later stage ·
+    // wait: N business days, then next stage · retry: redo this step after N
+    // business days (capped) · exit: leave, optionally into another campaign.
+    path: { type: String, enum: ['stay', 'continue', 'jump', 'wait', 'retry', 'exit'], default: 'stay' },
+    toStage: { type: String, default: '' },
+    days: { type: Number, default: 2, min: 0, max: 60 },
+    maxTries: { type: Number, default: 2, min: 1, max: 5 },
+    moveTo: { type: Schema.Types.ObjectId, ref: 'Campaign', default: null },
+    setStatus: { type: String, default: '' },
+    lostReason: { type: String, default: '' },
+    taskTitle: { type: String, default: '' },
+    taskAssign: { type: String, default: 'owner' },
+    taskDueDays: { type: Number, default: 0, min: 0, max: 60 },
+    nurture: { type: Boolean, default: false },
+    restartDays: { type: Number, default: 90, min: 1, max: 730 },
+    dnc: { type: Boolean, default: false },
+  },
+  { _id: false }
+)
+
 const stageSchema = new Schema({
   name: { type: String, required: true },
   channel: { type: String, enum: CHANNELS, required: true },
@@ -385,6 +415,8 @@ const stageSchema = new Schema({
   voicemail: { type: Boolean, default: false },
   // LinkedIn stages: a connection invite, counted toward the daily cap (G10).
   linkedinInvite: { type: Boolean, default: false },
+  // Customised outcome branches for this stage (see branchSchema).
+  branches: { type: [branchSchema], default: [] },
 })
 
 const campaignSchema = new Schema(
@@ -449,6 +481,13 @@ const enrollmentSchema = new Schema(
       linkedin: { type: Number, default: 0 },
     },
     voicemailLeft: { type: Boolean, default: false },
+    /* Set by a branch: when the stage timer next runs out, 'retry' redoes the
+       current step and 'continue' moves on (skipping the No response branch). */
+    pendingAction: { type: String, enum: ['', 'retry', 'continue'], default: '' },
+    // Retries used per stage index, e.g. { "2": 1 }.
+    retries: { type: Object, default: {} },
+    // Last time someone checked for a reply and found none ("No reply yet").
+    replyCheckedAt: { type: Date, default: null },
     enteredStageAt: { type: Date, default: Date.now },
     // When the stage engine should advance this contact. Null = waiting on a human.
     dueAt: { type: Date, default: null, index: true },
@@ -932,6 +971,7 @@ const ACTIVITY_TYPES = [
   'dnc_added',
   'step_skipped',
   'recheck_logged',
+  'branch_applied',
   'flow_paused',
   'flow_resumed',
   'company_locked',

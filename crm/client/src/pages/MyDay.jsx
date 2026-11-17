@@ -3,7 +3,9 @@ import { Link } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import WorkItem from '../components/WorkItem.jsx'
-import { Empty, Loading } from '../components/ui.jsx'
+import { Channel, Empty, Loading } from '../components/ui.jsx'
+import { useToast } from '../components/Toast.jsx'
+import { ConfirmNext } from '../components/OutcomeBits.jsx'
 import { requestNotificationPermission, notificationPermission } from '../components/useReminders.js'
 import { num } from '../components/format.js'
 
@@ -169,6 +171,8 @@ export default function MyDay({ counts }) {
           ))}
         </Section>
 
+        <WaitingReplies />
+
         {c.awaitingApproval > 0 && (
           <div className="queue-section">
             <div className="queue-head">
@@ -200,5 +204,104 @@ export default function MyDay({ counts }) {
         )}
       </div>
     </>
+  )
+}
+
+/* ---------------- Waiting on a reply ----------------
+ * Emails and LinkedIn messages that went out before today, still on that
+ * stage, with no reply logged. Log what came back in one click, or "No reply
+ * yet" (hidden for a day). The outcome runs the stage's branch. */
+const QUICK = {
+  email: ['positive', 'other', 'not_now', 'not_interested', 'unsubscribe', 'out_of_office', 'bounced'],
+  linkedin: ['invite_accepted', 'replied_positive', 'replied_other', 'replied_not_now', 'replied_not_interested'],
+}
+
+function WaitingReplies() {
+  const { outcomeCatalogue } = useAuth()
+  const toast = useToast()
+  const [items, setItems] = useState(null)
+  const [busy, setBusy] = useState('')
+  const [confirm, setConfirm] = useState(null)
+
+  const load = useCallback(() => {
+    api.waitingReplies().then((d) => setItems(d.items || [])).catch(() => setItems([]))
+  }, [])
+  useEffect(() => { load() }, [load])
+  if (!items || !items.length) return null
+
+  const label = (ch, key) => ((outcomeCatalogue?.[ch] || []).find((o) => o.key === key) || {}).label || key
+
+  async function log(item, key) {
+    await api.addNote(item.contact._id, {
+      type: 'reply_logged', channel: item.channel, outcome: key, enrollmentId: item.enrollmentId,
+      body: `${label(item.channel, key)} (logged from Waiting on a reply)`,
+    })
+    toast.success(`${label(item.channel, key)} logged`)
+    load()
+  }
+
+  async function pick(item, key) {
+    setBusy(`${item.enrollmentId}:${key}`)
+    try {
+      const p = await api.outcomePreview({ contactId: item.contact._id, enrollmentId: item.enrollmentId, channel: item.channel, outcome: key })
+      if (p.destructive) setConfirm({ item, key, plan: p.plan })
+      else await log(item, key)
+    } catch (err) {
+      toast.error(err.message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  return (
+    <div className="queue-section">
+      <div className="queue-head">
+        <span className="queue-title">Waiting on a reply</span>
+        <span className="queue-count">{items.length}</span>
+      </div>
+      <div className="card">
+        <div className="card-body small muted" style={{ paddingBottom: 4 }}>
+          Check the inbox or LinkedIn for each one, then log what came back. The stage's branch decides what happens next.
+        </div>
+        {items.map((it) => (
+          <div key={`${it.enrollmentId}`} className="work-row" style={{ cursor: 'default', flexWrap: 'wrap', alignItems: 'flex-start' }}>
+            <Channel value={it.channel} showLabel={false} />
+            <div className="work-main" style={{ minWidth: 220 }}>
+              <div className="work-name truncate">
+                <Link to={`/contacts/${it.contact._id}`}>{[it.contact.firstName, it.contact.lastName].filter(Boolean).join(' ') || 'Contact'}</Link>
+                <span className="faint" style={{ fontWeight: 400 }}> · {it.contact.company?.name || it.contact.companyName || ''}</span>
+              </div>
+              <div className="work-meta truncate">
+                {it.campaign?.name} · {it.stageName} · {it.channel === 'email' ? 'sent' : 'done'} {new Date(it.at).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}
+              </div>
+            </div>
+            <div className="row" style={{ gap: 4, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              {(QUICK[it.channel] || []).map((k) => (
+                <button key={k} className="btn btn-sm" disabled={!!busy} onClick={() => pick(it, k)}>
+                  {busy === `${it.enrollmentId}:${k}` ? '…' : label(it.channel, k)}
+                </button>
+              ))}
+              <button className="btn btn-sm btn-ghost" disabled={!!busy}
+                onClick={async () => {
+                  try { await api.noReplyYet(it.enrollmentId); load() } catch (err) { toast.error(err.message) }
+                }}>
+                No reply yet
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+      {confirm && (
+        <ConfirmNext
+          plan={confirm.plan}
+          onCancel={() => setConfirm(null)}
+          onConfirm={async () => {
+            const c = confirm
+            setConfirm(null)
+            try { await log(c.item, c.key) } catch (err) { toast.error(err.message) }
+          }}
+        />
+      )}
+    </div>
   )
 }

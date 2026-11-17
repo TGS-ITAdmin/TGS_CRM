@@ -350,6 +350,7 @@ async function advance({ enrollment, actorId = null, manual = false }) {
   if (openEntry && !openEntry.leftAt) openEntry.leftAt = now
 
   if (nextIndex >= campaign.stages.length) {
+    enrollment.pendingAction = ''
     enrollment.status = 'completed'
     enrollment.dueAt = null
     enrollment.exitedAt = now
@@ -370,6 +371,7 @@ async function advance({ enrollment, actorId = null, manual = false }) {
   await retireStageWork(enrollment._id, enrollment.currentStageIndex, contact._id, campaign._id)
 
   const stage = campaign.stages[nextIndex]
+  enrollment.pendingAction = ''
   enrollment.currentStageIndex = nextIndex
   enrollment.enteredStageAt = now
   enrollment.dueAt = await stageDue(campaign, now, stage.waitDays)
@@ -428,6 +430,7 @@ async function setStage({ enrollment, stageIndex, actorId }) {
   const openEntry = enrollment.history[enrollment.history.length - 1]
   if (openEntry && !openEntry.leftAt) openEntry.leftAt = now
 
+  enrollment.pendingAction = ''
   enrollment.currentStageIndex = index
   enrollment.enteredStageAt = now
   enrollment.dueAt = await stageDue(campaign, now, stage.waitDays)
@@ -532,6 +535,7 @@ const PAUSE_LABEL = { reply: 'they replied', company_lock: 'company locked', man
 async function pauseEnrollment({ enrollment, reason, actorId, note }) {
   if (enrollment.status !== 'active') return false
   enrollment.status = 'paused'
+  enrollment.pendingAction = ''
   enrollment.pausedReason = reason
   enrollment.pausedAt = new Date()
   enrollment.dueAt = null
@@ -561,6 +565,7 @@ async function resumeEnrollment({ enrollment, actorId }) {
   const now = new Date()
   const stage = campaign.stages[enrollment.currentStageIndex]
   enrollment.status = 'active'
+  enrollment.pendingAction = ''
   enrollment.pausedReason = ''
   enrollment.pausedAt = null
   enrollment.enteredStageAt = now
@@ -655,6 +660,32 @@ async function handleReply({ contact, positive = false, respond = true, source =
 
 /* Scheduler tick. Processes everything whose dueAt has passed.
  * Batched so a backlog of thousands doesn't blow up memory. */
+/* A branch said "retry this step": redo the current stage's work now and
+ * restart its timer. The retry count was recorded when it was scheduled. */
+async function retryStage({ enrollment, actorId = null }) {
+  const [campaign, contact] = await Promise.all([
+    Campaign.findById(enrollment.campaign),
+    Contact.findById(enrollment.contact).populate('company'),
+  ])
+  enrollment.pendingAction = ''
+  if (!campaign || !contact) {
+    await enrollment.save()
+    return { retried: false }
+  }
+  const idx = enrollment.currentStageIndex
+  const stage = campaign.stages[idx]
+  await retireStageWork(enrollment._id, idx, contact._id, campaign._id)
+  enrollment.dueAt = await stageDue(campaign, new Date(), stage ? stage.waitDays : 0)
+  await enrollment.save()
+  const work = await materializeStage({ enrollment, campaign, contact, stageIndex: idx, actorId })
+  const tries = Number((enrollment.retries || {})[String(idx)] || 0)
+  await logActivity({
+    contact: contact._id, type: 'branch_applied', campaign: campaign._id, stageIndex: idx, user: actorId,
+    title: `Retrying "${stage ? stage.name : 'stage'}" (try ${tries})`,
+  })
+  return { retried: true, work }
+}
+
 async function runDueEnrollments({ limit = 500, now = new Date() } = {}) {
   /* A paused (inactive) campaign does not move anyone on. Its contacts stay
      where they are and catch up when it is switched back on. */
@@ -671,8 +702,12 @@ async function runDueEnrollments({ limit = 500, now = new Date() } = {}) {
   let completed = 0
   const errors = []
 
+  const { onStageDue } = require('./outcomes')
   for (const enrollment of due) {
     try {
+      // A pending retry / wait, or a customised "No response" branch, decides
+      // first; otherwise the usual move to the next stage.
+      if (await onStageDue(enrollment)) { advanced++; continue }
       const result = await advance({ enrollment, manual: false })
       if (result.advanced) advanced++
       if (result.completed) completed++
@@ -704,6 +739,7 @@ async function suppressContactEverywhere({ contactId, reason, actorId, keepCallT
 
 module.exports = {
   scheduleRecheck,
+  retryStage,
   stageDue,
   pauseEnrollment,
   resumeEnrollment,

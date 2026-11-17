@@ -5,19 +5,33 @@ import { useAuth } from '../contexts/AuthContext.jsx'
 import { useToast } from './Toast.jsx'
 import { Channel, CopyButton, Modal, StatusPill } from './ui.jsx'
 import CampaignSelect, { CampaignChoiceHint } from './CampaignSelect.jsx'
+import { ConfirmNext, NextStepBox, OutcomeFields, useOutcomePreview } from './OutcomeBits.jsx'
 import { fullName, companyName, dueLabel, isOverdue } from './format.js'
 
 /* One row of the work queue. Collapsed it shows who and why; expanded it
  * shows the merged script and everything needed to close the task without
  * leaving the page. */
 export default function WorkItem({ task, onDone, defaultOpen = false }) {
-  const { statusMap, callOutcomes, user, can } = useAuth()
+  const { statusMap, callOutcomes, outcomeCatalogue, user, can } = useAuth()
   const toast = useToast()
   const [open, setOpen] = useState(defaultOpen)
   const [outcome, setOutcome] = useState('')
   const [notes, setNotes] = useState('')
   const [callbackDays, setCallbackDays] = useState('')
   const [busy, setBusy] = useState(false)
+  // Outcome extras: the right person (Wrong person) and a check-back date (Not now).
+  const [person, setPerson] = useState({})
+  const [restartDate, setRestartDate] = useState('')
+  const [confirming, setConfirming] = useState(null)
+  const outcomeList = (outcomeCatalogue?.[task.channel] || []).length
+    ? outcomeCatalogue[task.channel]
+    : (task.channel === 'call' ? callOutcomes.map((o) => ({ key: o.value, label: o.label })) : [])
+  const outcomeDef = outcomeList.find((o) => o.key === outcome) || null
+  const preview = useOutcomePreview(
+    outcome && task.kind !== 'recheck' && (task.channel === 'call' || task.channel === 'linkedin')
+      ? { taskId: task._id, outcome, restartDate: restartDate || undefined, person }
+      : null
+  )
   // "Enroll in a campaign": the picker and its campaign list (loaded on open).
   const [enrollOpen, setEnrollOpen] = useState(false)
   const [campaigns, setCampaigns] = useState(null)
@@ -41,16 +55,16 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
     }
   }
 
-  const complete = () =>
-    run(
-      () =>
-        api.completeTask(task._id, {
-          outcome: outcome || undefined,
-          notes: notes || undefined,
-          callbackDays: callbackDays ? Number(callbackDays) : undefined,
-        }),
-      'Logged'
-    )
+  const outcomeBody = () => ({
+    outcome: outcome || undefined,
+    notes: notes || undefined,
+    callbackDays: callbackDays ? Number(callbackDays) : undefined,
+    person: outcomeDef?.needsPerson ? person : undefined,
+    restartDate: outcomeDef?.needsDate && restartDate ? restartDate : undefined,
+  })
+  const doComplete = () => run(() => api.completeTask(task._id, outcomeBody()), 'Logged')
+  // Guardrail: confirm first when the outcome ends a campaign, sets Lost or flags DNC.
+  const complete = () => (preview.destructive ? setConfirming({ then: doComplete }) : doComplete())
 
   /* Log this task (with the outcome and notes on the card), then move the
    * contact: every campaign they are in ends, its pending work is cancelled,
@@ -77,11 +91,7 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
     const chosen = (campaigns || []).find((c) => c._id === target)
     setBusy(true)
     try {
-      await api.completeTask(task._id, {
-        outcome: outcome || undefined,
-        notes: notes || undefined,
-        callbackDays: callbackDays ? Number(callbackDays) : undefined,
-      })
+      await api.completeTask(task._id, outcomeBody())
     } catch (err) {
       // Nothing was saved, so nothing else is attempted.
       toast.error(err.message)
@@ -179,13 +189,13 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
           <div className="divider" />
 
           {!isRecheck && <div className="grid grid-2">
-            {task.channel === 'call' && (
+            {(task.channel === 'call' || (task.channel === 'linkedin' && outcomeList.length > 0)) && (
               <div className="field" style={{ margin: 0 }}>
-                <label className="label">How did the call go?</label>
+                <label className="label">{task.channel === 'call' ? 'How did the call go?' : 'What happened? (optional)'}</label>
                 <select className="select" value={outcome} onChange={(e) => setOutcome(e.target.value)}>
-                  <option value="">Pick an outcome…</option>
-                  {callOutcomes.filter((o) => o.value !== 'voicemail' || !task.enrollment || task.voicemailAllowed).map((o) => (
-                    <option key={o.value} value={o.value}>{o.label}</option>
+                  <option value="">{task.channel === 'call' ? 'Pick an outcome…' : 'Just sent — nothing back yet'}</option>
+                  {outcomeList.filter((o) => o.key !== 'voicemail' || !task.enrollment || task.voicemailAllowed).map((o) => (
+                    <option key={o.key} value={o.key}>{o.label}</option>
                   ))}
                 </select>
               </div>
@@ -205,6 +215,14 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
               </select>
             </div>
           </div>}
+
+          {!isRecheck && (
+            <>
+              <OutcomeFields def={outcomeDef} person={person} setPerson={setPerson}
+                restartDate={restartDate} setRestartDate={setRestartDate} />
+              <NextStepBox preview={preview} />
+            </>
+          )}
 
           <div className="field" style={{ marginTop: 12 }}>
             <label className="label">Notes (saved to the timeline)</label>
@@ -274,6 +292,14 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
         </div>
       )}
 
+      {confirming && (
+        <ConfirmNext
+          plan={preview.plan} busy={busy}
+          onCancel={() => setConfirming(null)}
+          onConfirm={async () => { const next = confirming.then; setConfirming(null); await next() }}
+        />
+      )}
+
       {enrollOpen && (
         <Modal
           title="Enroll in a campaign"
@@ -281,7 +307,12 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
           footer={
             <>
               <button className="btn" disabled={busy} onClick={() => setEnrollOpen(false)}>Cancel</button>
-              <button className="btn btn-primary" disabled={busy || !target} onClick={logAndEnroll}>
+              <button className="btn btn-primary" disabled={busy || !target}
+                onClick={() => {
+                  if (!preview.destructive) return logAndEnroll()
+                  setEnrollOpen(false)
+                  setConfirming({ then: logAndEnroll })
+                }}>
                 {busy ? 'Working…' : task.channel === 'call' ? 'Log call & enroll' : 'Mark done & enroll'}
               </button>
             </>
@@ -297,7 +328,7 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
               </div>
               <div className="hint">
                 {task.channel === 'call'
-                  ? `First the call is logged as “${(callOutcomes.find((o) => o.value === outcome) || {}).label || outcome}”${notes ? ' with your notes' : ''}. `
+                  ? `First the call is logged as “${outcomeDef?.label || outcome}”${notes ? ' with your notes' : ''}. `
                   : 'First this task is marked done. '}
                 Then {contact.firstName || 'the contact'} leaves every campaign they are in now (their pending tasks
                 and drafts are cancelled) and starts stage 1 of the campaign you pick. The timeline keeps everything.

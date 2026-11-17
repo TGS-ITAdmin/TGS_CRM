@@ -8,6 +8,7 @@ import ContactForm from '../components/ContactForm.jsx'
 import WorkItem from '../components/WorkItem.jsx'
 import LostReasonDialog from '../components/LostReasonDialog.jsx'
 import CampaignSelect, { CampaignChoiceHint } from '../components/CampaignSelect.jsx'
+import { ConfirmNext, NextStepBox, OutcomeFields, useOutcomePreview } from '../components/OutcomeBits.jsx'
 import { Channel, Confirm, CopyButton, Empty, Loading, Modal, StatusPill } from '../components/ui.jsx'
 import { dateTime, fullName, relativeDate } from '../components/format.js'
 
@@ -30,7 +31,7 @@ function Row({ label, children }) {
 export default function ContactDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
-  const { statusMap, statuses, isAdmin, can, statusRoles, emailStatuses, dncStatuses } = useAuth()
+  const { statusMap, statuses, isAdmin, can, statusRoles, emailStatuses, dncStatuses, outcomeCatalogue } = useAuth()
   const toast = useToast()
 
   const [data, setData] = useState(null)
@@ -40,9 +41,21 @@ export default function ContactDetail() {
   const [pendingLost, setPendingLost] = useState(null)
   const [note, setNote] = useState('')
   const [noteType, setNoteType] = useState('note')
-  const [noteChannel, setNoteChannel] = useState('')
+  const [noteChannel, setNoteChannel] = useState('email')
   const [replyType, setReplyType] = useState('positive')
   const [restartDate, setRestartDate] = useState('')
+  const [replyPerson, setReplyPerson] = useState({})
+  const [replyEnrollment, setReplyEnrollment] = useState('')
+  const [confirmReply, setConfirmReply] = useState(false)
+  // "What happens next" for the reply being logged (a dry run on the server).
+  const replyPreview = useOutcomePreview(
+    noteType === 'reply_logged' && data?.contact?._id
+      ? {
+          contactId: data.contact._id, channel: noteChannel, outcome: replyType,
+          enrollmentId: replyEnrollment || undefined, restartDate: restartDate || undefined, person: replyPerson,
+        }
+      : null
+  )
   const [campaigns, setCampaigns] = useState([])
 
   const load = useCallback(async () => {
@@ -66,14 +79,38 @@ export default function ContactDetail() {
   const { contact, activities, enrollments, pendingTasks, queuedMessages, customFields } = data
   const active = enrollments.filter((e) => e.status === 'active')
 
-  async function saveNote() {
+  // Running campaigns (active or paused) — a reply is logged against one of them.
+  const runningFlows = enrollments.filter((e) => ['active', 'paused'].includes(e.status))
+  const replyOutcomes = outcomeCatalogue?.[noteChannel] || []
+  const replyDef = replyOutcomes.find((o) => o.key === replyType) || null
+  const needsCampaignPick = noteType === 'reply_logged' && runningFlows.length > 1 && !replyEnrollment
+
+  function changeReplyChannel(ch) {
+    setNoteChannel(ch)
+    setReplyType({ email: 'positive', linkedin: 'replied_positive', call: 'connected' }[ch] || '')
+  }
+
+  async function saveNote(confirmed = false) {
     if (!note.trim()) return
+    if (noteType === 'reply_logged' && replyPreview.destructive && !confirmed) {
+      setConfirmReply(true)
+      return
+    }
     try {
       const res = await api.addNote(contact._id, {
         body: note, type: noteType, channel: noteChannel || undefined,
-        ...(noteType === 'reply_logged' ? { replyType, restartDate: restartDate || undefined } : {}),
+        ...(noteType === 'reply_logged'
+          ? {
+              outcome: replyType,
+              enrollmentId: replyEnrollment && replyEnrollment !== 'none' ? replyEnrollment : undefined,
+              restartDate: replyDef?.needsDate && restartDate ? restartDate : undefined,
+              person: replyDef?.needsPerson ? replyPerson : undefined,
+            }
+          : {}),
       })
       setNote('')
+      setReplyPerson({})
+      setRestartDate('')
       if (noteType !== 'reply_logged') toast.success('Note saved')
       else {
         const r = res.reply
@@ -300,25 +337,33 @@ export default function ContactDetail() {
                     <option value="reply_logged">They replied</option>
                   </select>
                   {noteType === 'reply_logged' && (
-                    <select className="select" style={{ maxWidth: 200 }} value={replyType}
-                      onChange={(e) => setReplyType(e.target.value)}>
-                      <option value="positive">Positive / interested</option>
-                      <option value="other">Question / other</option>
-                      <option value="not_now">Not now</option>
-                      <option value="not_interested">Not interested</option>
-                      <option value="unsubscribe">Stop / remove me</option>
-                    </select>
-                  )}
-                  {noteType === 'reply_logged' && (
-                    <select className="select" style={{ maxWidth: 150 }} value={noteChannel}
-                      onChange={(e) => setNoteChannel(e.target.value)}>
-                      <option value="">Which channel?</option>
-                      <option value="linkedin">LinkedIn</option>
+                    <select className="select" style={{ maxWidth: 140 }} value={noteChannel}
+                      onChange={(e) => changeReplyChannel(e.target.value)}>
                       <option value="email">Email</option>
+                      <option value="linkedin">LinkedIn</option>
                       <option value="call">Call</option>
                     </select>
                   )}
+                  {noteType === 'reply_logged' && (
+                    <select className="select" style={{ maxWidth: 230 }} value={replyType}
+                      onChange={(e) => setReplyType(e.target.value)}>
+                      {replyOutcomes.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+                    </select>
+                  )}
                 </div>
+                {noteType === 'reply_logged' && runningFlows.length > 1 && (
+                  <div className="field" style={{ marginBottom: 8, maxWidth: 420 }}>
+                    <label className="label">Which campaign is this reply about?</label>
+                    <select className="select" value={replyEnrollment} onChange={(e) => setReplyEnrollment(e.target.value)}>
+                      <option value="">Choose…</option>
+                      {runningFlows.map((e) => (
+                        <option key={e._id} value={e._id}>{e.campaign?.name || 'Campaign'}{e.status === 'paused' ? ' (paused)' : ''}</option>
+                      ))}
+                      <option value="none">None of these</option>
+                    </select>
+                    <div className="hint">The branch of that campaign's current stage decides what happens next.</div>
+                  </div>
+                )}
                 <textarea
                   className="textarea" style={{ minHeight: 70 }} value={note}
                   onChange={(e) => setNote(e.target.value)}
@@ -327,30 +372,27 @@ export default function ContactDetail() {
                     : 'Anything worth remembering.'}
                 />
                 <div className="row" style={{ marginTop: 8 }}>
-                  <button className="btn btn-primary btn-sm" disabled={!note.trim()} onClick={saveNote}>
+                  <button className="btn btn-primary btn-sm" disabled={!note.trim() || needsCampaignPick}
+                    onClick={() => saveNote(false)}>
                     Save
                   </button>
-                  {noteType === 'reply_logged' && !noteChannel && (
-                    <span className="hint" style={{ margin: 0 }}>Pick a channel so the report can attribute it.</span>
+                  {needsCampaignPick && (
+                    <span className="hint" style={{ margin: 0 }}>Pick which campaign the reply is about.</span>
                   )}
                 </div>
-                {noteType === 'reply_logged' && replyType === 'not_now' && (
-                  <div className="field" style={{ marginTop: 8, marginBottom: 0, maxWidth: 260 }}>
-                    <label className="label">Check back on (optional)</label>
-                    <input className="input" type="date" value={restartDate} onChange={(e) => setRestartDate(e.target.value)} />
-                    <div className="hint">Blank = in 90 days. Nurture is switched on.</div>
-                  </div>
-                )}
                 {noteType === 'reply_logged' && (
-                  <div className="hint" style={{ marginTop: 8 }}>
-                    {{
-                      positive: 'Pauses their flows, locks the company, and creates a Respond task due within 15 minutes (business hours).',
-                      other: 'Pauses their flows, locks the company, and creates a Respond task for the next business day.',
-                      not_now: 'Pauses their flows and locks the company. Nurture on, with the check-back date above.',
-                      not_interested: 'Lost (Not interested) with Nurture on; their flows end and the company is locked.',
-                      unsubscribe: 'Email status → Unsubscribed (no more email). Lost; their flows end and the company is locked.',
-                    }[replyType]}
-                  </div>
+                  <>
+                    <OutcomeFields def={replyDef} person={replyPerson} setPerson={setReplyPerson}
+                      restartDate={restartDate} setRestartDate={setRestartDate} />
+                    <NextStepBox preview={replyPreview} />
+                  </>
+                )}
+                {confirmReply && (
+                  <ConfirmNext
+                    plan={replyPreview.plan}
+                    onCancel={() => setConfirmReply(false)}
+                    onConfirm={async () => { setConfirmReply(false); await saveNote(true) }}
+                  />
                 )}
               </div>
             </div>

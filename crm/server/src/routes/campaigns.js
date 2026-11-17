@@ -2,6 +2,7 @@ const express = require('express')
 const { Campaign, Enrollment, Contact, Task, OutboxMessage, User, CHANNELS } = require('../db')
 const { requireAuth, requirePermission, ownerScope } = require('../middleware/auth')
 const { canUseCampaign } = require('../lib/permissions')
+const { sanitizeBranches } = require('../lib/outcomes')
 const { enroll, advance, setStage, exitEnrollment, materializeStage, logActivity } = require('../lib/engine')
 const { renderStage } = require('../lib/merge')
 
@@ -17,15 +18,29 @@ function withChannels(c) {
 
 function sanitizeStages(stages) {
   if (!Array.isArray(stages)) return []
-  return stages.map((s, i) => ({
-    name: String(s.name || `Stage ${i + 1}`).trim(),
-    channel: CHANNELS.includes(s.channel) ? s.channel : 'email',
-    subject: String(s.subject || ''),
-    body: String(s.body || ''),
-    waitDays: Math.max(0, Number(s.waitDays) || 0),
-    voicemail: s.channel === 'call' && !!s.voicemail,
-    linkedinInvite: s.channel === 'linkedin' && !!s.linkedinInvite,
-  }))
+  /* Stages keep their id across saves, so a branch's "jump to" target stays
+     pointed at the same stage when stages are edited or reordered. */
+  const seen = new Set()
+  const ids = stages.map((s) => {
+    const id = String(s?._id || '')
+    if (!/^[0-9a-f]{24}$/i.test(id) || seen.has(id)) return ''
+    seen.add(id)
+    return id
+  })
+  return stages.map((s, i) => {
+    const channel = CHANNELS.includes(s.channel) ? s.channel : 'email'
+    return {
+      ...(ids[i] ? { _id: ids[i] } : {}),
+      name: String(s.name || `Stage ${i + 1}`).trim(),
+      channel,
+      subject: String(s.subject || ''),
+      body: String(s.body || ''),
+      waitDays: Math.max(0, Number(s.waitDays) || 0),
+      voicemail: channel === 'call' && !!s.voicemail,
+      linkedinInvite: channel === 'linkedin' && !!s.linkedinInvite,
+      branches: sanitizeBranches(s.branches, channel, i, ids),
+    }
+  })
 }
 
 /* ---- List with live counts ---- */
