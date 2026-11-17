@@ -266,9 +266,8 @@ async function enroll({ contactId, campaignId, actorId }) {
   if (!campaign.stages.length) {
     throw Object.assign(new Error('That campaign has no stages yet'), { status: 400 })
   }
-  if (campaign.active === false) {
-    throw Object.assign(new Error(`"${campaign.name}" is paused. Turn it back on before adding contacts.`), { status: 400 })
-  }
+  // A paused campaign can take contacts: they wait there (tasks hidden, no
+  // stage moves) until the campaign is switched back on.
 
   /* G2: nobody new is enrolled at a locked company (the contact who caused
      the lock is the exception — their own follow-up continues by hand). */

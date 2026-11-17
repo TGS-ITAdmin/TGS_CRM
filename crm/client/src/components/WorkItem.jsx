@@ -3,20 +3,25 @@ import { Link } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import { useToast } from './Toast.jsx'
-import { Channel, CopyButton, StatusPill } from './ui.jsx'
+import { Channel, CopyButton, Modal, StatusPill } from './ui.jsx'
+import CampaignSelect, { CampaignChoiceHint } from './CampaignSelect.jsx'
 import { fullName, companyName, dueLabel, isOverdue } from './format.js'
 
 /* One row of the work queue. Collapsed it shows who and why; expanded it
  * shows the merged script and everything needed to close the task without
  * leaving the page. */
 export default function WorkItem({ task, onDone, defaultOpen = false }) {
-  const { statusMap, callOutcomes, user } = useAuth()
+  const { statusMap, callOutcomes, user, can } = useAuth()
   const toast = useToast()
   const [open, setOpen] = useState(defaultOpen)
   const [outcome, setOutcome] = useState('')
   const [notes, setNotes] = useState('')
   const [callbackDays, setCallbackDays] = useState('')
   const [busy, setBusy] = useState(false)
+  // "Enroll in a campaign": the picker and its campaign list (loaded on open).
+  const [enrollOpen, setEnrollOpen] = useState(false)
+  const [campaigns, setCampaigns] = useState(null)
+  const [target, setTarget] = useState('')
 
   const contact = task.contact
   if (!contact) return null
@@ -46,6 +51,59 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
         }),
       'Logged'
     )
+
+  /* Log this task (with the outcome and notes on the card), then move the
+   * contact: every campaign they are in ends, its pending work is cancelled,
+   * and they start stage 1 of the chosen campaign. Same rules as Move. */
+  const ENDING_OUTCOMES = ['not_interested', 'do_not_call']
+  const canEnrollHere = can('campaigns.enroll') && task.kind !== 'recheck'
+  const enrollBlocked = task.channel === 'call' && (!outcome || ENDING_OUTCOMES.includes(outcome))
+
+  async function openEnroll() {
+    setTarget('')
+    setEnrollOpen(true)
+    if (!campaigns) {
+      try {
+        const d = await api.listCampaigns()
+        setCampaigns(d.campaigns || [])
+      } catch (err) {
+        toast.error(err.message)
+        setEnrollOpen(false)
+      }
+    }
+  }
+
+  async function logAndEnroll() {
+    const chosen = (campaigns || []).find((c) => c._id === target)
+    setBusy(true)
+    try {
+      await api.completeTask(task._id, {
+        outcome: outcome || undefined,
+        notes: notes || undefined,
+        callbackDays: callbackDays ? Number(callbackDays) : undefined,
+      })
+    } catch (err) {
+      // Nothing was saved, so nothing else is attempted.
+      toast.error(err.message)
+      setBusy(false)
+      return
+    }
+    try {
+      const res = await api.moveContacts({
+        contactIds: [contact._id],
+        toCampaign: target,
+        reason: `Moved to "${chosen?.name || 'another campaign'}" from a task`,
+      })
+      if (res.errors?.length) throw new Error(res.errors[0].error)
+      toast.success(`${task.channel === 'call' ? 'Call logged' : 'Done'} · enrolled in "${chosen?.name}"`)
+    } catch (err) {
+      toast.error(`${task.channel === 'call' ? 'Call logged' : 'Task closed'}, but enrolling failed: ${err.message}`)
+    } finally {
+      setBusy(false)
+      setEnrollOpen(false)
+      onDone?.()
+    }
+  }
 
   const isRecheck = task.kind === 'recheck'
   const answerRecheck = (answer) =>
@@ -183,6 +241,14 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
               onClick={() => run(() => api.snoozeTask(task._id, 7), 'Snoozed a week')}>
               Snooze 1 week
             </button>
+            {canEnrollHere && (
+              <button className="btn" disabled={busy || enrollBlocked} onClick={openEnroll}
+                title={enrollBlocked
+                  ? (outcome ? 'Not available after Not interested or Don\'t call again' : 'Pick how the call went first')
+                  : 'Log this task, then move the contact to another campaign'}>
+                Enroll in a campaign
+              </button>
+            )}
             <div className="spacer" />
             <button className="btn btn-ghost btn-sm" disabled={busy}
               onClick={() => run(() => api.skipTask(task._id, 'Skipped from the work queue'), 'Skipped')}>
@@ -202,7 +268,44 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
           {task.swappedFrom === 'email' && (
             <div className="hint">This replaces an email step: their email bounced.</div>
           )}
+          {canEnrollHere && task.channel === 'call' && ENDING_OUTCOMES.includes(outcome) && (
+            <div className="hint">“Enroll in a campaign” is off for this outcome: the contact is being marked Lost.</div>
+          )}
         </div>
+      )}
+
+      {enrollOpen && (
+        <Modal
+          title="Enroll in a campaign"
+          onClose={() => !busy && setEnrollOpen(false)}
+          footer={
+            <>
+              <button className="btn" disabled={busy} onClick={() => setEnrollOpen(false)}>Cancel</button>
+              <button className="btn btn-primary" disabled={busy || !target} onClick={logAndEnroll}>
+                {busy ? 'Working…' : task.channel === 'call' ? 'Log call & enroll' : 'Mark done & enroll'}
+              </button>
+            </>
+          }
+        >
+          {!campaigns ? (
+            <div className="small faint">Loading campaigns…</div>
+          ) : (
+            <>
+              <div className="field">
+                <label className="label">Campaign for {fullName(contact)}</label>
+                <CampaignSelect campaigns={campaigns} value={target} onChange={setTarget} autoFocus />
+              </div>
+              <div className="hint">
+                {task.channel === 'call'
+                  ? `First the call is logged as “${(callOutcomes.find((o) => o.value === outcome) || {}).label || outcome}”${notes ? ' with your notes' : ''}. `
+                  : 'First this task is marked done. '}
+                Then {contact.firstName || 'the contact'} leaves every campaign they are in now (their pending tasks
+                and drafts are cancelled) and starts stage 1 of the campaign you pick. The timeline keeps everything.
+              </div>
+              <CampaignChoiceHint campaign={campaigns.find((c) => c._id === target)} />
+            </>
+          )}
+        </Modal>
       )}
     </div>
   )

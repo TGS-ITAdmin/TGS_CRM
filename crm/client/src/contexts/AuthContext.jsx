@@ -92,6 +92,7 @@ export function AuthProvider({ children }) {
         statusRoleCatalogue: boot?.statusRoleCatalogue || [],
         emailStatuses: boot?.emailStatuses || [],
         dncStatuses: boot?.dncStatuses || [],
+        outreachRules: boot?.outreachRules || {},
         users: boot?.users || [],
         callOutcomes: boot?.callOutcomes || [],
         mergeFields: boot?.mergeFields || [],

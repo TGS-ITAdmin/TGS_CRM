@@ -7,6 +7,7 @@ import { useToast } from '../components/Toast.jsx'
 import ContactForm from '../components/ContactForm.jsx'
 import WorkItem from '../components/WorkItem.jsx'
 import LostReasonDialog from '../components/LostReasonDialog.jsx'
+import CampaignSelect, { CampaignChoiceHint } from '../components/CampaignSelect.jsx'
 import { Channel, Confirm, CopyButton, Empty, Loading, Modal, StatusPill } from '../components/ui.jsx'
 import { dateTime, fullName, relativeDate } from '../components/format.js'
 
@@ -608,8 +609,7 @@ function EnrollDialog({ mode, campaigns, contactId, onClose, onDone }) {
   const [id, setId] = useState('')
   const [busy, setBusy] = useState(false)
   const toast = useToast()
-  // Only campaigns that have stages and that this person is allowed to use.
-  const usable = campaigns.filter((c) => (c.stages || []).length > 0 && c.canEnroll !== false)
+  const chosen = campaigns.find((c) => c._id === id)
 
   async function go() {
     setBusy(true)
@@ -641,29 +641,20 @@ function EnrollDialog({ mode, campaigns, contactId, onClose, onDone }) {
         </>
       }
     >
-      {usable.length === 0 ? (
-        <Empty icon="⚑" title="No usable campaigns">
-          There is no active campaign with at least one stage that you are allowed to use.
-          Create one, or ask an admin to give you access under Settings → Users.
-        </Empty>
+      {campaigns.length === 0 ? (
+        <Empty icon="⚑" title="No campaigns yet">Create a campaign first.</Empty>
       ) : (
         <>
           <div className="field">
             <label className="label">Campaign</label>
-            <select className="select" value={id} onChange={(e) => setId(e.target.value)} autoFocus>
-              <option value="">Choose…</option>
-              {usable.map((c) => (
-                <option key={c._id} value={c._id}>
-                  {c.name} ({c.stages.length} stage{c.stages.length === 1 ? '' : 's'})
-                </option>
-              ))}
-            </select>
+            <CampaignSelect campaigns={campaigns} value={id} onChange={setId} autoFocus />
           </div>
           <div className="hint">
             {mode === 'move'
               ? 'Exits every campaign this contact is currently in, cancels their pending work, and starts them at stage 1 of the new one. The timeline keeps everything.'
               : 'The contact enters at stage 1 and their first task or draft is created immediately. Existing campaigns are left alone.'}
           </div>
+          <CampaignChoiceHint campaign={chosen} />
         </>
       )}
     </Modal>

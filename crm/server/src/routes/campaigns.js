@@ -51,8 +51,9 @@ router.get('/', async (req, res) => {
     campaigns: campaigns.map((c) => ({
       ...withChannels(c),
       counts: byCampaign.get(String(c._id)) || { active: 0, completed: 0, exited: 0 },
-      // Whether this person may add or move contacts into it (never a paused one).
-      canEnroll: c.active !== false && canUseCampaign(req.user, c._id),
+      // Whether this person may add or move contacts into it. Paused
+      // campaigns count: contacts wait there until it is switched back on.
+      canEnroll: canUseCampaign(req.user, c._id),
     })),
   })
 })
@@ -275,10 +276,6 @@ router.post('/move', async (req, res) => {
   const target = await Campaign.findById(toCampaign)
   if (!target) return res.status(404).json({ error: 'Destination campaign not found' })
   if (!target.stages.length) return res.status(400).json({ error: 'The destination campaign has no stages yet' })
-  // Checked before anyone is taken out of their current campaign.
-  if (target.active === false) {
-    return res.status(400).json({ error: `"${target.name}" is paused. Turn it back on before moving contacts into it.` })
-  }
 
   const allowed = await Contact.find({ _id: { $in: contactIds }, ...ownerScope(req) }).select('_id').lean()
   const out = { moved: 0, exited: 0, cancelledTasks: 0, cancelledMessages: 0, errors: [] }

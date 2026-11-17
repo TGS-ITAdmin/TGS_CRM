@@ -5,6 +5,7 @@ import { useAuth } from '../contexts/AuthContext.jsx'
 import { useToast } from '../components/Toast.jsx'
 import ContactForm from '../components/ContactForm.jsx'
 import LostReasonDialog from '../components/LostReasonDialog.jsx'
+import CampaignSelect, { CampaignChoiceHint } from '../components/CampaignSelect.jsx'
 import CompanyPicker from '../components/CompanyPicker.jsx'
 import SavedViews from '../components/SavedViews.jsx'
 import { Channel, Confirm, Empty, Loading, Modal, Pager, StatusPill } from '../components/ui.jsx'
@@ -414,8 +415,7 @@ function CampaignPicker({ title, campaigns, note, confirmLabel, danger, onConfir
   const [id, setId] = useState('')
   const [busy, setBusy] = useState(false)
   const toast = useToast()
-  // Only campaigns that have stages and that this person is allowed to use.
-  const usable = campaigns.filter((c) => (c.stages || []).length > 0 && c.canEnroll !== false)
+  const chosen = campaigns.find((c) => c._id === id)
 
   return (
     <Modal
@@ -435,25 +435,16 @@ function CampaignPicker({ title, campaigns, note, confirmLabel, danger, onConfir
         </>
       }
     >
-      {usable.length === 0 ? (
-        <Empty icon="⚑" title="No usable campaigns">
-          There is no active campaign with at least one stage that you are allowed to use.
-          Create one, or ask an admin to give you access under Settings → Users.
-        </Empty>
+      {campaigns.length === 0 ? (
+        <Empty icon="⚑" title="No campaigns yet">Create a campaign first.</Empty>
       ) : (
         <>
           <div className="field">
             <label className="label">Campaign</label>
-            <select className="select" value={id} onChange={(e) => setId(e.target.value)}>
-              <option value="">Choose…</option>
-              {usable.map((c) => (
-                <option key={c._id} value={c._id}>
-                  {c.name} ({c.stages.length} stage{c.stages.length === 1 ? '' : 's'}{(c.channels || []).length ? `, ${c.channels.join(' + ')}` : ''})
-                </option>
-              ))}
-            </select>
+            <CampaignSelect campaigns={campaigns} value={id} onChange={setId} />
           </div>
           <div className="hint">{note}</div>
+          <CampaignChoiceHint campaign={chosen} />
         </>
       )}
     </Modal>
