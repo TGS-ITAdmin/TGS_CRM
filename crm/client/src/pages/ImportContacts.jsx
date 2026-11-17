@@ -121,6 +121,16 @@ export default function ImportContacts() {
                 </div>
               )}
 
+              {result.invalidEmails > 0 && (
+                <div className="banner banner-info" style={{ marginTop: 12 }}>
+                  <span>ℹ</span>
+                  <div>
+                    {result.invalidEmails} row{result.invalidEmails === 1 ? ' had' : 's had'} text in the email column that
+                    is not an email address (for example “No Email Address”). {result.invalidEmails === 1 ? 'It was' : 'They were'} imported
+                    without an email. Rows with no email are matched to existing contacts by first name, last name and company.
+                  </div>
+                </div>
+              )}
               {result.suppressed > 0 && (
                 <div className="banner banner-warn">
                   <span>⚠</span>

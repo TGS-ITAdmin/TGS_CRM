@@ -964,9 +964,12 @@ router.post('/import', requirePermission('contacts.import'), upload.single('file
   const result = {
     total: rows.length, created: 0, updated: 0, skipped: 0,
     suppressed: 0, companiesCreated: 0, errors: [],
+    // Rows whose email cell held text that is not an address ("No Email Address").
+    invalidEmails: 0,
   }
   const seenEmail = new Set()
   const seenLinkedIn = new Set()
+  const seenNameCo = new Set()
   const companiesBefore = await Company.countDocuments()
 
   for (let i = 0; i < rows.length; i++) {
@@ -974,6 +977,7 @@ router.post('/import', requirePermission('contacts.import'), upload.single('file
     const doc = {}
     const companyExtra = {}
     let companyName = ''
+    let badEmail = false
 
     for (const [field, header] of Object.entries(mapping)) {
       if (!header) continue
@@ -993,8 +997,16 @@ router.post('/import', requirePermission('contacts.import'), upload.single('file
       }
       if (!EDITABLE.includes(field)) continue
       if (field === 'tags') doc.tags = value.split(/[;,|]/).map((t) => t.trim()).filter(Boolean)
-      else if (field === 'email') doc.email = value.toLowerCase()
-      else doc[field] = value
+      else if (field === 'email') {
+        /* Only a real address is kept. Text like "No Email Address" or "N/A"
+           used to be stored as the email, so every such row looked like a
+           duplicate of the first and was skipped. */
+        if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) doc.email = value.toLowerCase()
+        else badEmail = true
+      } else if ((field === 'phone' || field === 'mobile') && !/\d/.test(value)) {
+        // "Not publicly verified" and similar are notes, not numbers.
+        continue
+      } else doc[field] = value
     }
 
     if (!doc.firstName && !doc.lastName && !companyName && !doc.email) {
@@ -1008,7 +1020,19 @@ router.post('/import', requirePermission('contacts.import'), upload.single('file
     doc.owner = owner
     if (createdStatus && !doc.status) doc.status = createdStatus
 
+    if (badEmail) result.invalidEmails = (result.invalidEmails || 0) + 1
     if (doc.email && seenEmail.has(doc.email)) { result.skipped++; continue }
+    /* No email and no LinkedIn URL: the same first + last name at the same
+       company is the same person (inside this file, and in the CRM below). */
+    // A row with no name either (company only) is matched on company + phone.
+    const hasName = !!(doc.firstName || doc.lastName)
+    const phoneDigits = String(doc.phone || doc.mobile || '').replace(/\D/g, '')
+    const nameKey = !doc.email && !doc.linkedinUrl && companyName && (hasName || phoneDigits)
+      ? (hasName
+        ? [doc.firstName, doc.lastName, companyName].map((v) => String(v || '').trim().toLowerCase()).join('|')
+        : `phone:${phoneDigits}|${companyName.trim().toLowerCase()}`)
+      : ''
+    if (nameKey && seenNameCo.has(nameKey)) { result.skipped++; continue }
     if (doc.linkedinUrl && seenLinkedIn.has(doc.linkedinUrl)) { result.skipped++; continue }
 
     const domain = domainFromEmail(doc.email)
@@ -1047,7 +1071,20 @@ router.post('/import', requirePermission('contacts.import'), upload.single('file
       const dupeOr = []
       if (doc.email) dupeOr.push({ email: doc.email })
       if (doc.linkedinUrl) dupeOr.push({ linkedinUrl: doc.linkedinUrl })
-      const existing = dupeOr.length ? await Contact.findOne({ $or: dupeOr }) : null
+      let existing = dupeOr.length ? await Contact.findOne({ $or: dupeOr }) : null
+      if (!existing && nameKey) {
+        const exact = (v) => new RegExp(`^${escapeRegex(String(v || '').trim())}$`, 'i')
+        const atCompany = [...(doc.company ? [{ company: doc.company }] : []), { companyName: exact(companyName) }]
+        existing = await Contact.findOne(hasName
+          ? { firstName: exact(doc.firstName), lastName: exact(doc.lastName), $or: atCompany }
+          : {
+              $and: [
+                { $or: atCompany },
+                { $or: [{ phone: exact(doc.phone || doc.mobile) }, { mobile: exact(doc.phone || doc.mobile) }] },
+                { $or: [{ firstName: { $in: [null, ''] } }, { firstName: { $exists: false } }] },
+              ],
+            })
+      }
 
       if (existing) {
         if (onDuplicate === 'update') {
@@ -1076,6 +1113,7 @@ router.post('/import', requirePermission('contacts.import'), upload.single('file
       }
       if (doc.email) seenEmail.add(doc.email)
       if (doc.linkedinUrl) seenLinkedIn.add(doc.linkedinUrl)
+      if (nameKey) seenNameCo.add(nameKey)
     } catch (err) {
       result.skipped++
       if (result.errors.length < 50) result.errors.push({ row: i + 2, error: err.message })
