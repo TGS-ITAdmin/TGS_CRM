@@ -43,6 +43,7 @@ const lostReasonRequired = (res) => res.status(400).json({
 
 const { cancelChannelWork, applySuppressionChanges } = require('../lib/suppression')
 const { applyOutcome, findOutcome } = require('../lib/outcomes')
+const { rebind: rebindAudit } = require('../lib/audit')
 
 
 // Company-level fields a contact form or CSV may also carry.
@@ -928,7 +929,7 @@ router.post('/import/preview', requirePermission('contacts.import'), upload.sing
   })
 })
 
-router.post('/import', requirePermission('contacts.import'), upload.single('file'), async (req, res) => {
+router.post('/import', requirePermission('contacts.import'), upload.single('file'), rebindAudit, async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' })
   let mapping, options
   try {
