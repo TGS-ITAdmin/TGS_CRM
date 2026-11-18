@@ -173,6 +173,10 @@ export const api = {
   complianceSignoff: (body) => request('POST', '/api/settings/rules/compliance-signoff', body),
   escalations: () => request('GET', '/api/work/escalations'),
   outcomePreview: (body) => request('POST', '/api/work/outcome-preview', body),
+  // Admin activity log
+  auditLog: (params) => request('GET', `/api/audit${qs(params)}`),
+  auditEntry: (id) => request('GET', `/api/audit/${id}`),
+  auditUndo: (id, body) => request('POST', `/api/audit/${id}/undo`, body),
   waitingReplies: () => request('GET', '/api/work/waiting-replies'),
   noReplyYet: (enrollmentId) => request('POST', `/api/work/waiting-replies/${enrollmentId}/checked`, {}),
   bulkContacts: (body) => request('POST', '/api/contacts/bulk', body),

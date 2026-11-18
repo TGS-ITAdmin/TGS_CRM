@@ -24,6 +24,7 @@ import Board from './pages/Board.jsx'
 import Outbox from './pages/Outbox.jsx'
 import CallList from './pages/CallList.jsx'
 import Reports from './pages/Reports.jsx'
+import ActivityLog from './pages/ActivityLog.jsx'
 import Settings from './pages/Settings.jsx'
 
 const ROLE_LABELS = { admin: 'Admin', manager: 'Manager', rep: 'Rep', viewer: 'Read-only' }
@@ -45,6 +46,7 @@ const NAV = [
   { to: '/board', label: 'Outreach board', icon: '▦' },
   { group: 'Insight' },
   { to: '/reports', label: 'Reports', icon: '◔' },
+  { to: '/activity-log', label: 'Activity log', icon: '🕑', adminOnly: true },
   { to: '/settings', label: 'Settings', icon: '⚙' },
 ]
 
@@ -69,7 +71,7 @@ function Sidebar({ counts }) {
       </div>
 
       <nav className="nav">
-        {NAV.filter((item) => !item.needs || can(item.needs)).map((item, i) =>
+        {NAV.filter((item) => (!item.needs || can(item.needs)) && (!item.adminOnly || user.role === 'admin')).map((item, i) =>
           item.group ? (
             <div className="nav-group-label" key={`g${i}`}>{item.group}</div>
           ) : (
@@ -147,6 +149,7 @@ export default function App() {
           <Route path="/board" element={<Board />} />
           <Route path="/board/:id" element={<Board />} />
           <Route path="/reports" element={<Reports />} />
+          <Route path="/activity-log" element={<ActivityLog />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
