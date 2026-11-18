@@ -43,6 +43,8 @@ app.use('/api/quotes', require('./routes/quotes'))
 app.use('/api/campaigns', require('./routes/campaigns'))
 app.use('/api/work', require('./routes/work'))
 app.use('/api/reports', require('./routes/reports'))
+// Admin activity log with undo (admins only).
+app.use('/api/audit', require('./routes/audit'))
 
 // Manual scheduler kick, for testing the stage engine without waiting.
 app.post('/api/scheduler/run', requireAuth, requireAdmin, async (req, res) => {

@@ -1028,6 +1028,16 @@ activitySchema.index({ user: 1, type: 1, createdAt: -1 })
 
 /* ------------------------------------------------------------------ */
 
+/* Admin activity log: each data model records the changes signed-in people
+   make (see lib/audit.js). Counter is left out — quote numbers never rewind. */
+const { auditPlugin } = require('./lib/audit')
+for (const [name, schema] of [
+  ['User', userSchema], ['Settings', settingsSchema], ['Company', companySchema], ['Contact', contactSchema],
+  ['Suppression', suppressionSchema], ['Campaign', campaignSchema], ['Deal', dealSchema], ['Product', productSchema],
+  ['Quote', quoteSchema], ['CustomField', customFieldSchema], ['SavedView', savedViewSchema],
+  ['Enrollment', enrollmentSchema], ['Task', taskSchema], ['OutboxMessage', outboxSchema], ['Activity', activitySchema],
+]) schema.plugin(auditPlugin, { model: name })
+
 const User = model('User', userSchema)
 const Settings = model('Settings', settingsSchema)
 const Company = model('Company', companySchema)
