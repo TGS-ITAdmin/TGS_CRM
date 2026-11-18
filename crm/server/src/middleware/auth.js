@@ -28,6 +28,8 @@ async function requireAuth(req, res, next) {
     if (!user || !user.active) return res.status(401).json({ error: 'Account inactive' })
     req.user = user
     req.can = (key) => can(user, key)
+    // Admin activity log: changes made during this request are recorded.
+    require('../lib/audit').bindRequest(req, res)
     next()
   } catch {
     res.status(401).json({ error: 'Session expired' })
