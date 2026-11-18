@@ -324,6 +324,12 @@ function DraftModal({ message, readOnly, canSend, onClose, onChanged }) {
               onClick={() => run(() => api.cancelOutbox(message._id, 'Cancelled during review'), 'Draft cancelled')}>
               Cancel this draft
             </button>
+            {message.assignRole && message.status === 'queued' && (
+              <button className="btn btn-ghost" disabled={busy}
+                onClick={() => run(() => api.releaseEmail(message._id), 'Put back in the queue')}>
+                Put back in queue
+              </button>
+            )}
             <div className="spacer" />
             <button className="btn" disabled={busy}
               onClick={() => run(() => api.updateOutbox(message._id, { subject, body }), 'Draft saved')}>

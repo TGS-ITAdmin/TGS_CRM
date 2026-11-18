@@ -74,6 +74,29 @@ const ROLE_PRESETS = {
     description: 'Works their own book. Sees the shared pipeline but edits only their own deals.',
     permissions: ['contacts.edit', 'deals.viewAll', 'campaigns.enroll'],
   },
+  /* Outreach roles. Each works like a Rep (own contacts and tasks only) and
+     can be picked as the owner of a campaign step, so its tasks land in a
+     shared queue that everyone in the role can claim from. */
+  coldcaller: {
+    label: 'Coldcaller',
+    description: 'Makes the calls. Works like a Rep: sees their own contacts and tasks, plus call steps assigned to Coldcallers.',
+    permissions: ['contacts.edit', 'deals.viewAll', 'campaigns.enroll'],
+  },
+  lead_scraper: {
+    label: 'Lead scraper',
+    description: 'Finds and loads leads. Works like a Rep, and can also import contacts from CSV or Excel.',
+    permissions: ['contacts.edit', 'contacts.import', 'deals.viewAll', 'campaigns.enroll'],
+  },
+  linkedin_lead_gen: {
+    label: 'LinkedIn lead gen',
+    description: 'Runs LinkedIn outreach. Works like a Rep, plus LinkedIn steps assigned to LinkedIn lead gen.',
+    permissions: ['contacts.edit', 'deals.viewAll', 'campaigns.enroll'],
+  },
+  email_lead_gen: {
+    label: 'Email lead gen',
+    description: 'Runs email outreach. Works like a Rep, plus email steps assigned to Email lead gen.',
+    permissions: ['contacts.edit', 'deals.viewAll', 'campaigns.enroll'],
+  },
   viewer: {
     label: 'Read-only',
     description: 'Sees everything, changes nothing. Useful for a trainee, an auditor, or someone working their notice.',

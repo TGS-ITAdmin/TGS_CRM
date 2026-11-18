@@ -70,7 +70,29 @@ function assignedScope(req, field = 'assignedTo') {
   return { [field]: req.user._id }
 }
 
+/* Shared-queue work open to this person: steps given to their role that
+ * nobody has claimed yet. */
+function claimableScope(req) {
+  return { assignedTo: null, assignRole: req.user.role }
+}
+
+/* Like ownerScope, plus contacts this person holds open work for — so
+ * someone who claimed a call from the Coldcaller queue can open and update
+ * that contact without becoming its owner. Access ends with the work. */
+async function contactAccessScope(req) {
+  const base = ownerScope(req)
+  if (!Object.keys(base).length) return base
+  const { Task, OutboxMessage } = require('../db')
+  const [t, o] = await Promise.all([
+    Task.distinct('contact', { assignedTo: req.user._id, status: 'pending' }),
+    OutboxMessage.distinct('contact', { assignedTo: req.user._id, status: 'queued' }),
+  ])
+  const ids = [...t, ...o]
+  if (!ids.length) return base
+  return { $or: [base, { _id: { $in: ids } }] }
+}
+
 module.exports = {
   signToken, requireAuth, requirePermission, requireAdmin,
-  ownerScope, assignedScope, can,
+  ownerScope, assignedScope, claimableScope, contactAccessScope, can,
 }

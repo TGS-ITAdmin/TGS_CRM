@@ -21,11 +21,11 @@ function rank(c) {
   return note === 'paused' ? 1 : 0
 }
 
-export default function CampaignSelect({ campaigns, value, onChange, autoFocus = false }) {
+export default function CampaignSelect({ campaigns, value, onChange, autoFocus = false, emptyLabel = 'Choose…' }) {
   const sorted = [...campaigns].sort((a, b) => rank(a) - rank(b) || String(a.name).localeCompare(String(b.name)))
   return (
     <select className="select" value={value} onChange={(e) => onChange(e.target.value)} autoFocus={autoFocus}>
-      <option value="">Choose…</option>
+      <option value="">{emptyLabel}</option>
       {sorted.map((c) => {
         const { disabled, note } = campaignChoice(c)
         const stages = (c.stages || []).length

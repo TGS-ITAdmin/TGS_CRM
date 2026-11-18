@@ -21,7 +21,7 @@ const CHANNEL_HELP = {
 
 export default function CampaignEditor() {
   const { id } = useParams()
-  const { can, mergeFields, users } = useAuth()
+  const { can, mergeFields, users, boot } = useAuth()
   const isAdmin = can('campaigns.manage')
   const toast = useToast()
 
@@ -233,6 +233,8 @@ export default function CampaignEditor() {
                 </div>
 
                 <div className="hint" style={{ marginTop: -4, marginBottom: 12 }}>{CHANNEL_HELP[stage.channel]}</div>
+                <StepOwner stage={stage} roles={boot?.roles || []} users={users} disabled={!isAdmin}
+                  onChange={(patch) => Object.entries(patch).forEach(([k, v]) => setStage(i, k, v))} />
                 {stage.channel === 'call' && (
                   <label className="row small" style={{ gap: 8, marginBottom: 12 }}>
                     <input type="checkbox" className="checkbox" checked={!!stage.voicemail} disabled={!isAdmin}
@@ -815,6 +817,51 @@ function FlowDiagram({ stages, campaigns }) {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+/* Who does this step: the contact's owner (default), everyone in a role
+ * (shared queue — first to claim it owns it), or one named person. */
+function StepOwner({ stage, roles, users, disabled, onChange }) {
+  const mode = stage.assignMode || ''
+  const value = mode === 'role' ? `role:${stage.assignRole}` : mode === 'user' ? `user:${stage.assignUser}` : ''
+  const role = roles.find((r) => r.value === stage.assignRole)
+  const person = users.find((u) => String(u.id) === String(stage.assignUser))
+  function pick(v) {
+    if (!v) return onChange({ assignMode: '', assignRole: '', assignUser: null })
+    const [kind, id] = v.split(':')
+    if (kind === 'role') onChange({ assignMode: 'role', assignRole: id, assignUser: null })
+    else onChange({ assignMode: 'user', assignRole: '', assignUser: id })
+  }
+  let hint = 'The contact\u2019s owner gets this step (how it has always worked).'
+  if (mode === 'role') {
+    hint = role?.people
+      ? `Goes to the ${role.label} queue: all ${role.people} ${role.people === 1 ? 'person' : 'people'} in that role see it on My Day, and whoever claims it first owns it.`
+      : `Nobody has the ${role?.label || stage.assignRole} role yet, so until someone does this step goes to the contact\u2019s owner.`
+  } else if (mode === 'user') {
+    hint = person
+      ? `Always goes to ${person.name}. If their account is deactivated it goes to the contact\u2019s owner.`
+      : 'That person is no longer active, so this step goes to the contact\u2019s owner. Pick someone else.'
+  }
+  return (
+    <div className="field" style={{ maxWidth: 420, marginBottom: 12 }}>
+      <label className="label">Who does this step</label>
+      <select className="select" value={value} disabled={disabled} onChange={(e) => pick(e.target.value)}>
+        <option value="">Contact owner (default)</option>
+        <optgroup label="A role — shared queue">
+          {roles.map((r) => (
+            <option key={r.value} value={`role:${r.value}`}>
+              {r.label} ({r.people} {r.people === 1 ? 'person' : 'people'})
+            </option>
+          ))}
+        </optgroup>
+        <optgroup label="A specific person">
+          {users.map((u) => <option key={u.id} value={`user:${u.id}`}>{u.name}</option>)}
+          {mode === 'user' && !person && <option value={value}>(inactive user)</option>}
+        </optgroup>
+      </select>
+      <div className="hint">{hint}</div>
     </div>
   )
 }

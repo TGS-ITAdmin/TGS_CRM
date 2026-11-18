@@ -1,9 +1,9 @@
 const express = require('express')
 const { Campaign, Enrollment, Contact, Task, OutboxMessage, User, CHANNELS } = require('../db')
-const { requireAuth, requirePermission, ownerScope } = require('../middleware/auth')
+const { requireAuth, requirePermission, ownerScope, contactAccessScope } = require('../middleware/auth')
 const { canUseCampaign } = require('../lib/permissions')
 const { sanitizeBranches } = require('../lib/outcomes')
-const { enroll, advance, setStage, exitEnrollment, materializeStage, logActivity } = require('../lib/engine')
+const { enroll, advance, setStage, exitEnrollment, materializeStage, logActivity, skipStep } = require('../lib/engine')
 const { renderStage } = require('../lib/merge')
 
 const router = express.Router()
@@ -14,6 +14,19 @@ router.use(requireAuth)
  * campaign picker crashed reading channels.join. Computed here instead. */
 function withChannels(c) {
   return { ...c, channels: [...new Set((c.stages || []).map((s) => s.channel))] }
+}
+
+/* Who does the step: the contact owner (default), a role's shared queue or
+ * one person. Anything unrecognised falls back to the default. */
+function stageAssignment(s) {
+  const { ROLES } = require('../lib/permissions')
+  if (s.assignMode === 'role' && ROLES.includes(s.assignRole) && s.assignRole !== 'admin') {
+    return { assignMode: 'role', assignRole: s.assignRole, assignUser: null }
+  }
+  if (s.assignMode === 'user' && /^[0-9a-f]{24}$/i.test(String(s.assignUser || ''))) {
+    return { assignMode: 'user', assignRole: '', assignUser: String(s.assignUser) }
+  }
+  return { assignMode: '', assignRole: '', assignUser: null }
 }
 
 function sanitizeStages(stages) {
@@ -39,6 +52,7 @@ function sanitizeStages(stages) {
       voicemail: channel === 'call' && !!s.voicemail,
       linkedinInvite: channel === 'linkedin' && !!s.linkedinInvite,
       branches: sanitizeBranches(s.branches, channel, i, ids),
+      ...stageAssignment(s),
     }
   })
 }
@@ -333,6 +347,19 @@ router.post('/enrollments/:id/advance', async (req, res) => {
 
   const result = await advance({ enrollment, actorId: req.user._id, manual: true })
   res.json(result)
+})
+
+/* Skip the current step for this one contact and move them on now. */
+router.post('/enrollments/:id/skip-step', async (req, res) => {
+  const enrollment = await Enrollment.findById(req.params.id)
+  if (!enrollment) return res.status(404).json({ error: 'Enrollment not found' })
+  const contact = await Contact.findOne({ _id: enrollment.contact, ...(await contactAccessScope(req)) })
+  if (!contact) return res.status(403).json({ error: 'That contact is not yours' })
+  try {
+    res.json(await skipStep({ enrollment, actorId: req.user._id, reason: String(req.body?.reason || '').slice(0, 300) }))
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message })
+  }
 })
 
 /* Jump straight to a chosen stage — how the board's drag-and-drop moves a card. */

@@ -1,4 +1,5 @@
 const {
+  User,
   Contact,
   Company,
   Campaign,
@@ -71,6 +72,25 @@ async function logActivity(fields) {
   return doc
 }
 
+/* Who does a stage's work. Default ('' mode) is unchanged: the contact's
+ * owner. A step given to a person goes to them while their account is
+ * active; a step given to a role goes to that role's shared queue
+ * (assignedTo empty until someone claims it). If nobody active holds the
+ * role, or the person is deactivated, it falls back to the owner so work is
+ * never stranded. */
+async function stageAssignee(stage, contact, enrollment, actorId) {
+  const fallback = { assignedTo: contact.owner || enrollment.enrolledBy || actorId || null, assignRole: '' }
+  if (stage.assignMode === 'user' && stage.assignUser) {
+    const u = await User.findOne({ _id: stage.assignUser, active: true }).select('_id').lean()
+    return u ? { assignedTo: u._id, assignRole: '' } : fallback
+  }
+  if (stage.assignMode === 'role' && stage.assignRole && stage.assignRole !== 'admin') {
+    const holders = await User.countDocuments({ role: stage.assignRole, active: true })
+    return holders ? { assignedTo: null, assignRole: stage.assignRole, holders } : fallback
+  }
+  return fallback
+}
+
 const CHANNEL_VERB = {
   linkedin: 'Send LinkedIn message',
   call: 'Call',
@@ -121,14 +141,15 @@ async function materializeStage({ enrollment, campaign, contact, stageIndex, act
   const countTouch = () => Enrollment.updateOne({ _id: enrollment._id }, { $inc: { [`touches.${channel}`]: 1 } })
 
   const merged = renderStage(stage, contact)
-  const assignedTo = contact.owner || enrollment.enrolledBy || actorId || null
+  const who = await stageAssignee(stage, contact, enrollment, actorId)
   const base = {
     contact: contact._id,
     enrollment: enrollment._id,
     campaign: campaign._id,
     stageIndex,
     stageName: stage.name,
-    assignedTo,
+    assignedTo: who.assignedTo,
+    assignRole: who.assignRole,
     dueAt: new Date(),
   }
 
@@ -188,11 +209,13 @@ async function materializeStage({ enrollment, campaign, contact, stageIndex, act
   if (channel === 'linkedin' && stage.linkedinInvite && !swappedFrom) {
     // G10: at most N invites per profile (rep) per business day; overflow rolls on.
     extra.linkedinInvite = true
-    const cap = Math.max(1, Number(R.linkedinInviteCap) || 20)
+    // A shared queue's cap is the per-person cap times the people in the role.
+    const cap = Math.max(1, Number(R.linkedinInviteCap) || 20) * (base.assignRole ? who.holders || 1 : 1)
     for (let i = 0; i < 30; i++) {
       const { start, end } = rules.dayBounds(dueAt, R)
       const used = await Task.countDocuments({
-        assignedTo: base.assignedTo, linkedinInvite: true,
+        ...(base.assignRole ? { assignRole: base.assignRole } : { assignedTo: base.assignedTo }),
+        linkedinInvite: true,
         status: { $in: ['pending', 'done'] }, dueAt: { $gte: start, $lt: end },
       })
       if (used < cap) break
@@ -403,6 +426,35 @@ async function advance({ enrollment, actorId = null, manual = false }) {
   })
 
   return { advanced: true, stageIndex: nextIndex, work }
+}
+
+/* Skip the current step for one contact: its open work is closed as
+ * skipped (emails cancelled), the skip is on the timeline, and the contact
+ * moves to the next step now (or finishes, on the last step). */
+async function skipStep({ enrollment, actorId, reason = '' }) {
+  if (enrollment.status !== 'active') {
+    throw Object.assign(new Error('Only an active campaign can skip a step. Resume it first.'), { status: 400 })
+  }
+  const campaign = await Campaign.findById(enrollment.campaign).select('name stages').lean()
+  const index = enrollment.currentStageIndex
+  const stage = campaign?.stages?.[index]
+  const note = reason ? `Step skipped: ${reason}` : 'Step skipped'
+  await Task.updateMany(
+    { enrollment: enrollment._id, stageIndex: index, status: 'pending' },
+    { $set: { status: 'skipped', notes: note, completedAt: new Date(), completedBy: actorId || null } }
+  )
+  await OutboxMessage.updateMany(
+    { enrollment: enrollment._id, stageIndex: index, status: 'queued' },
+    { $set: { status: 'cancelled', error: note } }
+  )
+  await logActivity({
+    contact: enrollment.contact, type: 'step_skipped', channel: stage?.channel,
+    campaign: enrollment.campaign, stageIndex: index, user: actorId || null,
+    title: `Skipped step ${index + 1}${stage ? ` — ${stage.name}` : ''}`,
+    body: reason || '',
+  })
+  const result = await advance({ enrollment, actorId, manual: true })
+  return { ...result, skippedStage: stage?.name || '' }
 }
 
 /* Jump an enrollment to a specific stage — forwards or backwards. Used by the
@@ -738,6 +790,8 @@ async function suppressContactEverywhere({ contactId, reason, actorId, keepCallT
 }
 
 module.exports = {
+  skipStep,
+  stageAssignee,
   scheduleRecheck,
   retryStage,
   stageDue,

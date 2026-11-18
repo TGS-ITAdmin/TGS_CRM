@@ -417,6 +417,12 @@ const stageSchema = new Schema({
   linkedinInvite: { type: Boolean, default: false },
   // Customised outcome branches for this stage (see branchSchema).
   branches: { type: [branchSchema], default: [] },
+  /* Who does this step. '' = the contact's owner (the original behaviour);
+     'role' = a shared queue for everyone in assignRole (first to claim it
+     owns it); 'user' = always assignUser. */
+  assignMode: { type: String, enum: ['', 'role', 'user'], default: '' },
+  assignRole: { type: String, default: '' },
+  assignUser: { type: Schema.Types.ObjectId, ref: 'User', default: null },
 })
 
 const campaignSchema = new Schema(
@@ -540,6 +546,10 @@ const taskSchema = new Schema(
     // The stage script with merge fields already resolved, ready to use.
     scriptBody: { type: String, default: '' },
     assignedTo: { type: Schema.Types.ObjectId, ref: 'User', index: true },
+    // Shared-queue work: no assignee yet, open to everyone in this role.
+    // Claiming it sets assignedTo; the role stays as a record of the queue.
+    assignRole: { type: String, default: '', index: true },
+    claimedAt: { type: Date, default: null },
     dueAt: { type: Date, default: Date.now, index: true },
     status: {
       type: String,
@@ -575,6 +585,8 @@ const outboxSchema = new Schema(
     subject: { type: String, default: '' },
     body: { type: String, default: '' }, // merged, editable before send
     assignedTo: { type: Schema.Types.ObjectId, ref: 'User', index: true },
+    assignRole: { type: String, default: '', index: true },
+    claimedAt: { type: Date, default: null },
     status: {
       type: String,
       enum: ['queued', 'sent', 'failed', 'cancelled', 'suppressed'],

@@ -47,7 +47,7 @@ export default function MyDay({ counts }) {
 
   const c = data.counts
   const greeting = new Date().getHours() < 12 ? 'Good morning' : new Date().getHours() < 18 ? 'Good afternoon' : 'Good evening'
-  const nothingToDo = c.overdue + c.dueToday + c.awaitingApproval === 0
+  const nothingToDo = c.overdue + c.dueToday + c.awaitingApproval === 0 && !(data.sharedQueue?.total > 0)
 
   return (
     <>
@@ -170,6 +170,8 @@ export default function MyDay({ counts }) {
             <WorkItem key={t._id} task={t} onDone={load} />
           ))}
         </Section>
+
+        {data.sharedQueue?.total > 0 && <SharedQueue queue={data.sharedQueue} onChange={load} />}
 
         <WaitingReplies />
 
@@ -302,6 +304,77 @@ function WaitingReplies() {
           }}
         />
       )}
+    </div>
+  )
+}
+
+/* Steps a campaign gave to this person's role. Nobody owns them until they
+ * are claimed; the first to claim gets it and it moves into their own list. */
+function SharedQueue({ queue, onChange }) {
+  const toast = useToast()
+  const [busy, setBusy] = useState('')
+  const [showAll, setShowAll] = useState(false)
+  const all = [
+    ...queue.tasks.map((t) => ({ ...t, kindOf: 'task' })),
+    ...queue.emails.map((m) => ({ ...m, kindOf: 'email', channel: 'email', title: `Email ${[m.contact?.firstName, m.contact?.lastName].filter(Boolean).join(' ') || m.to} — ${m.stageName}` })),
+  ].sort((a, b) => new Date(a.dueAt) - new Date(b.dueAt))
+  const items = showAll ? all : all.slice(0, 8)
+
+  async function claim(it) {
+    setBusy(it._id)
+    try {
+      await (it.kindOf === 'email' ? api.claimEmail(it._id) : api.claimTask(it._id))
+      toast.success(it.kindOf === 'email' ? 'Claimed — it is in your Ready to Send' : 'Claimed — it is in your list below')
+    } catch (err) {
+      toast.error(err.message)
+    } finally {
+      setBusy('')
+      onChange()
+    }
+  }
+
+  return (
+    <div className="queue-section">
+      <div className="queue-head">
+        <span className="queue-title">{queue.roleLabel} queue — open to claim</span>
+        <span className="queue-count hot">{queue.total}</span>
+      </div>
+      <div className="card">
+        <div className="card-body small muted" style={{ paddingBottom: 6 }}>
+          Campaign steps given to everyone with the {queue.roleLabel} role. Claim one to make it yours; whoever claims first gets it.
+        </div>
+        <div className="table-wrap">
+          <table className="data">
+            <tbody>
+              {items.map((it) => (
+                <tr key={it._id}>
+                  <td style={{ width: 90 }}><Channel value={it.channel} /></td>
+                  <td>
+                    <strong>{it.title}</strong>
+                    <div className="small faint">
+                      {[it.contact?.company?.name || it.contact?.companyName, it.campaign?.name].filter(Boolean).join(' · ')}
+                    </div>
+                  </td>
+                  <td className="nowrap small">{new Date(it.dueAt).toLocaleDateString()}</td>
+                  <td className="right">
+                    <button className="btn btn-primary btn-sm" disabled={!!busy} onClick={() => claim(it)}>
+                      {busy === it._id ? 'Claiming…' : 'Claim'}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {all.length > items.length && (
+          <div className="card-body">
+            <button className="btn btn-sm" onClick={() => setShowAll(true)}>Show all {all.length}</button>
+          </div>
+        )}
+        {showAll && queue.total > all.length && (
+          <div className="card-body small faint">Showing the first {all.length} of {queue.total}. Claim some to see more.</div>
+        )}
+      </div>
     </div>
   )
 }

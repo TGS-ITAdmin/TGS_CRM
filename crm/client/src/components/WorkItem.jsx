@@ -268,9 +268,24 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
               </button>
             )}
             <div className="spacer" />
+            {task.assignRole && (
+              <button className="btn btn-ghost btn-sm" disabled={busy}
+                title="Put this back in the shared queue for someone else in the role to claim"
+                onClick={() => run(() => api.releaseTask(task._id), 'Put back in the queue')}>
+                Put back in queue
+              </button>
+            )}
+            {task.enrollment && !task.isManual && !isRecheck && (
+              <button className="btn btn-sm" disabled={busy}
+                title="Skip this campaign step for this contact and move them to the next step now"
+                onClick={() => run(() => api.skipTaskStep(task._id, 'Skipped from the work queue'), 'Step skipped — moved to the next step')}>
+                Skip step →
+              </button>
+            )}
             <button className="btn btn-ghost btn-sm" disabled={busy}
+              title="Close this task only. The contact stays on this step until its wait is over."
               onClick={() => run(() => api.skipTask(task._id, 'Skipped from the work queue'), 'Skipped')}>
-              Skip
+              Skip task
             </button>
           </div>
           {task.channel === 'call' && !outcome && (

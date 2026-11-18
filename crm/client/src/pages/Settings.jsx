@@ -1024,6 +1024,10 @@ function Users() {
                   <td className="small faint nowrap">{u.lastLoginAt ? dateTime(u.lastLoginAt) : 'never'}</td>
                   <td className="right nowrap">
                     <button className="btn btn-sm" onClick={() => setEditing(u)}>Edit access</button>
+                    {u.id !== me.id && (
+                      <button className="btn btn-ghost btn-sm" title={`Add a new user with the same access as ${u.name}`}
+                        onClick={() => setAdding(u)}>Copy access</button>
+                    )}
                     {u.active && u.id !== me.id && (
                       <button className="btn btn-ghost btn-sm" onClick={() => setRemoving(u)}>✕</button>
                     )}
@@ -1079,6 +1083,7 @@ function Users() {
         <UserModal
           user={editing} roles={roles} permissions={permissions} grantable={grantable} me={me}
           campaigns={campaigns} grantableCampaigns={grantableCampaigns}
+          allUsers={users} copyFrom={!editing && adding && adding !== true ? adding : null}
           onClose={() => { setAdding(false); setEditing(null) }}
           onSaved={async () => { setAdding(false); setEditing(null); await load(); await reloadBootstrap() }}
         />
@@ -1163,7 +1168,7 @@ function CampaignAccess({ campaigns, grantableCampaigns, mode, setMode, allowed,
   )
 }
 
-function UserModal({ user, roles, permissions, grantable, me, campaigns = [], grantableCampaigns = null, onClose, onSaved }) {
+function UserModal({ user, roles, permissions, grantable, me, campaigns = [], grantableCampaigns = null, allUsers = [], copyFrom = null, onClose, onSaved }) {
   const toast = useToast()
   const isSelf = user && user.id === me.id
   const [form, setForm] = useState({
@@ -1181,6 +1186,23 @@ function UserModal({ user, roles, permissions, grantable, me, campaigns = [], gr
     (user?.allowedCampaigns || []).length || restrictedGranter ? 'some' : 'all'
   )
   const [allowedCampaigns, setAllowedCampaigns] = useState(new Set(user?.allowedCampaigns || []))
+  const [copiedFrom, setCopiedFrom] = useState('')
+
+  /* Replicate a current employee's access: role, individual rights and
+     campaign limits. Name, email, password and their contacts are not copied.
+     The server still refuses anything the person saving cannot grant. */
+  function copyAccess(id) {
+    const src = allUsers.find((u) => u.id === id)
+    if (!src) { setCopiedFrom(''); return }
+    setForm((f) => ({ ...f, role: src.role }))
+    setOverrides({ ...(src.permissions || {}) })
+    const list = src.allowedCampaigns || []
+    setCampaignMode(list.length || restrictedGranter ? 'some' : 'all')
+    setAllowedCampaigns(new Set(list))
+    setCopiedFrom(src.id)
+  }
+  useEffect(() => { if (copyFrom) copyAccess(copyFrom.id) }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  const copySource = allUsers.find((u) => u.id === copiedFrom)
 
   const rolePreset = roles.find((r) => r.value === form.role)
   const grantableSet = new Set(grantable)
@@ -1297,6 +1319,19 @@ function UserModal({ user, roles, permissions, grantable, me, campaigns = [], gr
       ) : (
         <>
           <div className="divider" />
+          <Field label="Copy access from a current employee"
+            hint={copySource
+              ? `Copied ${copySource.name}'s role, individual rights and campaign limits. Change anything below before saving. Their contacts and tasks are not copied.`
+              : 'Optional. Gives this person the same role, rights and campaign limits as someone already set up.'}>
+            <select className="select" value={copiedFrom} onChange={(e) => copyAccess(e.target.value)}>
+              <option value="">— Don’t copy —</option>
+              {allUsers.filter((u) => u.id !== user?.id).map((u) => (
+                <option key={u.id} value={u.id} disabled={u.role === 'admin' && !grantableSet.has('users.manage')}>
+                  {u.name} — {roles.find((r) => r.value === u.role)?.label || u.role}{u.active ? '' : ' (deactivated)'}
+                </option>
+              ))}
+            </select>
+          </Field>
           <Field label="Role" hint={rolePreset?.description}>
             <select className="select" value={form.role} onChange={(e) => setRole(e.target.value)}>
               {roles.map((r) => (

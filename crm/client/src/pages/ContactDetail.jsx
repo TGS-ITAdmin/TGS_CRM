@@ -307,8 +307,10 @@ export default function ContactDetail() {
                               Snooze
                             </button>
                             <button className="btn btn-sm"
-                              onClick={() => act(() => api.advanceEnrollment(e._id), 'Moved to the next stage')}>
-                              Next stage →
+                              title="Skip this step for this contact: its open task or email is closed and they move to the next step now"
+                              onClick={() => act(() => api.skipEnrollmentStep(e._id, 'Skipped from the contact page'),
+                                e.currentStageIndex + 1 >= e.totalStages ? 'Step skipped — campaign finished' : 'Step skipped — moved to the next step')}>
+                              Skip step →
                             </button>
                             <button className="btn btn-sm btn-ghost"
                               onClick={() => act(() => api.exitEnrollment(e._id, 'Removed from the contact page'), 'Removed from campaign')}>

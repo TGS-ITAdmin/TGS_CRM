@@ -5,10 +5,11 @@ const ExcelJS = require('exceljs')
 const {
   Contact, Company, Activity, Enrollment, Task, OutboxMessage, Suppression, Campaign,
 } = require('../db')
-const { requireAuth, requirePermission, ownerScope } = require('../middleware/auth')
+const { requireAuth, requirePermission, ownerScope, contactAccessScope } = require('../middleware/auth')
 const {
-  logActivity, suppressContactEverywhere, handleReply, lockCompany, pauseEnrollment, resumeEnrollment, materializeStage,
+  logActivity, suppressContactEverywhere, handleReply, lockCompany, pauseEnrollment, resumeEnrollment, materializeStage, enroll,
 } = require('../lib/engine')
+const { canUseCampaign } = require('../lib/permissions')
 const {
   roleStatus, isLostStatus, applyLost, advanceStatus, statusList, statusForRole,
   REASON_UNSUBSCRIBED, EMAIL_STATUSES, DNC_STATUSES,
@@ -142,7 +143,7 @@ router.get('/', async (req, res) => {
 
 /* ---- Single contact with full timeline ---- */
 router.get('/:id', async (req, res) => {
-  const contact = await Contact.findOne({ _id: req.params.id, ...ownerScope(req) })
+  const contact = await Contact.findOne({ _id: req.params.id, ...(await contactAccessScope(req)) })
     .populate('owner', 'name email')
     .populate('company')
     .lean({ virtuals: true })
@@ -296,7 +297,7 @@ async function findDuplicate(doc, excludeId = null) {
 
 /* ---- Update ---- */
 router.put('/:id', requirePermission('contacts.edit'), async (req, res) => {
-  const contact = await Contact.findOne({ _id: req.params.id, ...ownerScope(req) })
+  const contact = await Contact.findOne({ _id: req.params.id, ...(await contactAccessScope(req)) })
   if (!contact) return res.status(404).json({ error: 'Contact not found' })
 
   const body = req.body || {}
@@ -413,7 +414,7 @@ router.delete('/:id', requirePermission('contacts.delete'), async (req, res) => 
 
 /* ---- Notes and manual reply logging ---- */
 router.post('/:id/notes', async (req, res) => {
-  const contact = await Contact.findOne({ _id: req.params.id, ...ownerScope(req) })
+  const contact = await Contact.findOne({ _id: req.params.id, ...(await contactAccessScope(req)) })
   if (!contact) return res.status(404).json({ error: 'Contact not found' })
   const { body, type, channel, replyType, restartDate, outcome, enrollmentId, person } = req.body || {}
   if (!body || !String(body).trim()) return res.status(400).json({ error: 'Note cannot be empty' })
@@ -956,6 +957,20 @@ router.post('/import', requirePermission('contacts.import'), upload.single('file
   const tag = (options.tag || '').trim()
   const onDuplicate = options.onDuplicate === 'update' ? 'update' : 'skip'
 
+  /* Optional: put the newly created contacts into a campaign at step 1.
+     Rows that matched an existing contact are left where they are. */
+  let campaign = null
+  if (options.campaignId) {
+    if (!/^[0-9a-f]{24}$/i.test(String(options.campaignId))) return res.status(400).json({ error: 'Unknown campaign' })
+    campaign = await Campaign.findById(options.campaignId).select('name stages').lean()
+    if (!campaign) return res.status(404).json({ error: 'That campaign no longer exists' })
+    if (!canUseCampaign(req.user, campaign._id)) {
+      return res.status(403).json({ error: `You cannot add contacts to "${campaign.name}"` })
+    }
+    if (!campaign.stages?.length) return res.status(400).json({ error: `"${campaign.name}" has no steps yet` })
+  }
+  const toEnroll = []
+
   const lostStatus = await roleStatus('lost')
   const createdStatus = await roleStatus('created')
   const suppressions = await Suppression.find().lean()
@@ -1103,6 +1118,7 @@ router.post('/import', requirePermission('contacts.import'), upload.single('file
         }
       } else {
         const contact = await Contact.create(doc)
+        if (campaign && !contact.doNotContact) toEnroll.push(contact._id)
         await Activity.create({
           contact: contact._id,
           company: contact.company || null,
@@ -1122,6 +1138,18 @@ router.post('/import', requirePermission('contacts.import'), upload.single('file
   }
 
   result.companiesCreated = (await Company.countDocuments()) - companiesBefore
+  if (campaign) {
+    result.campaign = { id: campaign._id, name: campaign.name, enrolled: 0, notEnrolled: 0, errors: [] }
+    for (const id of toEnroll) {
+      try {
+        const r = await enroll({ contactId: id, campaignId: campaign._id, actorId: req.user._id })
+        if (r.created) result.campaign.enrolled++
+      } catch (err) {
+        result.campaign.notEnrolled++
+        if (result.campaign.errors.length < 10) result.campaign.errors.push(err.message)
+      }
+    }
+  }
   res.json({ result })
 })
 

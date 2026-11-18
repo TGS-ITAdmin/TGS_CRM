@@ -2,10 +2,11 @@ const express = require('express')
 const {
   Task, OutboxMessage, Contact, Enrollment, Quote, Activity, Campaign, CALL_OUTCOMES,
 } = require('../db')
-const { requireAuth, assignedScope, ownerScope } = require('../middleware/auth')
+const { requireAuth, assignedScope, ownerScope, claimableScope } = require('../middleware/auth')
 const {
-  logActivity, advance, enroll, suppressContactEverywhere, handleReply, lockCompany,
+  logActivity, advance, enroll, suppressContactEverywhere, handleReply, lockCompany, skipStep,
 } = require('../lib/engine')
+const { ROLE_PRESETS } = require('../lib/permissions')
 const rules = require('../lib/rules')
 const { applyOutcome, findOutcome } = require('../lib/outcomes')
 const { sendMessage } = require('../lib/mailer')
@@ -71,6 +72,18 @@ router.get('/my-day', async (req, res) => {
     ]),
   ])
 
+  // Shared queue: steps given to this person's role that nobody has claimed.
+  // Anything due in the next 7 days, so the team can see what is coming.
+  const queueFilter = { ...claimableScope(req), ...live, dueAt: { $lt: weekEnd } }
+  const [queueTasks, queueEmails, queueTaskCount, queueEmailCount] = await Promise.all([
+    Task.find({ ...queueFilter, status: 'pending' }).sort({ dueAt: 1 }).limit(50)
+      .populate(CONTACT_POPULATE).populate('campaign', 'name').lean(),
+    OutboxMessage.find({ ...queueFilter, status: 'queued' }).sort({ createdAt: 1 }).limit(50)
+      .populate(CONTACT_POPULATE).populate('campaign', 'name').lean(),
+    Task.countDocuments({ ...queueFilter, status: 'pending' }),
+    OutboxMessage.countDocuments({ ...queueFilter, status: 'queued' }),
+  ])
+
   // G13: more than 1 business day overdue is escalated.
   const R = await rules.getRules()
   const cutoff = rules.escalationCutoff(new Date(), R)
@@ -84,6 +97,13 @@ router.get('/my-day', async (req, res) => {
     today: todayTasks,
     upcoming: upcomingTasks,
     awaitingApproval: queuedEmails,
+    sharedQueue: {
+      role: req.user.role,
+      roleLabel: ROLE_PRESETS[req.user.role]?.label || req.user.role,
+      tasks: queueTasks,
+      emails: queueEmails,
+      total: queueTaskCount + queueEmailCount,
+    },
     counts: {
       overdue: counts[0],
       escalated: escalatedCount,
@@ -209,8 +229,11 @@ router.get('/escalations', async (req, res) => {
     .populate('assignedTo', 'name').populate('contact', 'firstName lastName companyName').populate('campaign', 'name').lean()
   const byOwner = new Map()
   for (const t of tasks) {
-    const key = String(t.assignedTo?._id || 'none')
-    if (!byOwner.has(key)) byOwner.set(key, { owner: t.assignedTo?.name || 'Unassigned', count: 0, oldest: t.dueAt, tasks: [] })
+    let key = String(t.assignedTo?._id || 'none')
+    const unclaimed = !t.assignedTo && t.assignRole
+      ? `Unclaimed — ${ROLE_PRESETS[t.assignRole]?.label || t.assignRole} queue` : 'Unassigned'
+    if (!t.assignedTo && t.assignRole) key = `role:${t.assignRole}`
+    if (!byOwner.has(key)) byOwner.set(key, { owner: t.assignedTo?.name || unclaimed, count: 0, oldest: t.dueAt, tasks: [] })
     const g = byOwner.get(key)
     g.count++
     if (g.tasks.length < 10) g.tasks.push({ _id: t._id, title: t.title, dueAt: t.dueAt, channel: t.channel, contact: t.contact, campaign: t.campaign?.name || '' })
@@ -479,6 +502,63 @@ router.post('/tasks/:id/skip', async (req, res) => {
   task.completedBy = req.user._id
   await task.save()
   res.json({ ok: true })
+})
+
+/* ---- Shared queue: claim and release ----
+ * Claiming is a single conditional update, so two people clicking at the
+ * same moment cannot both get it. Admins may claim from any queue. */
+function claimFilter(req, id) {
+  const f = { _id: id, assignedTo: null, assignRole: { $exists: true, $nin: ['', null] } }
+  if (req.user.role !== 'admin') f.assignRole = req.user.role
+  return f
+}
+async function claim(Model, req, res, openStatus) {
+  const doc = await Model.findOneAndUpdate(
+    { ...claimFilter(req, req.params.id), status: openStatus },
+    { $set: { assignedTo: req.user._id, claimedAt: new Date() } },
+    { new: true }
+  )
+  if (!doc) {
+    const exists = await Model.findById(req.params.id).select('assignedTo').populate('assignedTo', 'name').lean()
+    return res.status(409).json({
+      error: exists?.assignedTo ? `Already claimed by ${exists.assignedTo.name}` : 'This is not in your queue any more',
+    })
+  }
+  // Belt and braces: confirm it is still ours before saying so.
+  const check = await Model.findById(doc._id).select('assignedTo').populate('assignedTo', 'name').lean()
+  if (String(check?.assignedTo?._id || '') !== String(req.user._id)) {
+    return res.status(409).json({ error: `Already claimed by ${check?.assignedTo?.name || 'someone else'}` })
+  }
+  res.json({ ok: true, item: doc })
+}
+async function release(Model, req, res, openStatus) {
+  const doc = await Model.findOneAndUpdate(
+    { _id: req.params.id, assignedTo: req.user._id, assignRole: { $exists: true, $nin: ['', null] }, status: openStatus },
+    { $set: { assignedTo: null, claimedAt: null } },
+    { new: true }
+  )
+  if (!doc) return res.status(404).json({ error: 'Only shared-queue work you claimed can be put back' })
+  res.json({ ok: true })
+}
+router.post('/tasks/:id/claim', (req, res) => claim(Task, req, res, 'pending'))
+router.post('/tasks/:id/release', (req, res) => release(Task, req, res, 'pending'))
+router.post('/outbox/:id/claim', (req, res) => claim(OutboxMessage, req, res, 'queued'))
+router.post('/outbox/:id/release', (req, res) => release(OutboxMessage, req, res, 'queued'))
+
+/* Skip this campaign step for this contact and move them to the next step. */
+router.post('/tasks/:id/skip-step', async (req, res) => {
+  const task = await Task.findOne({ _id: req.params.id, ...assignedScope(req) })
+  if (!task) return res.status(404).json({ error: 'Task not found' })
+  if (task.status !== 'pending') return res.status(400).json({ error: 'That task is already closed' })
+  const enrollment = task.enrollment ? await Enrollment.findById(task.enrollment) : null
+  if (!enrollment || enrollment.currentStageIndex !== task.stageIndex) {
+    return res.status(400).json({ error: 'This task is not the contact\'s current campaign step, so there is no step to skip. Use Skip instead.' })
+  }
+  try {
+    res.json(await skipStep({ enrollment, actorId: req.user._id, reason: String(req.body?.reason || '').slice(0, 300) }))
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message })
+  }
 })
 
 router.post('/tasks/:id/snooze', async (req, res) => {

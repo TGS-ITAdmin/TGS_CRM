@@ -68,6 +68,10 @@ router.get('/bootstrap', async (req, res) => {
     forecastCategories: FORECAST_CATEGORIES,
     pricingModels: PRICING_MODELS,
     users: users.map((u) => ({ id: u._id, name: u.name, email: u.email, role: u.role })),
+    // Roles a campaign step can be given to (shared queues), with headcount.
+    roles: ROLES.filter((r) => r !== 'admin').map((r) => ({
+      value: r, label: ROLE_PRESETS[r].label, people: users.filter((u) => u.role === r).length,
+    })),
     callOutcomes: CALL_OUTCOMES,
     mergeFields: MERGE_FIELDS,
     smtp: await smtpStatus(req.user),

@@ -27,7 +27,10 @@ import Reports from './pages/Reports.jsx'
 import ActivityLog from './pages/ActivityLog.jsx'
 import Settings from './pages/Settings.jsx'
 
-const ROLE_LABELS = { admin: 'Admin', manager: 'Manager', rep: 'Rep', viewer: 'Read-only' }
+const ROLE_LABELS = {
+  admin: 'Admin', manager: 'Manager', rep: 'Rep', viewer: 'Read-only',
+  coldcaller: 'Coldcaller', lead_scraper: 'Lead scraper', linkedin_lead_gen: 'LinkedIn lead gen', email_lead_gen: 'Email lead gen',
+}
 
 const NAV = [
   { group: 'Work' },

@@ -415,7 +415,7 @@ function RepsReport({ data }) {
                 <tr key={r.user.id}>
                   <td>
                     <span className="strong">{r.user.name}</span>
-                    <div className="small faint">{r.user.role === 'admin' ? 'Admin' : 'Rep'} · {r.user.timezone}</div>
+                    <div className="small faint">{{ admin: 'Admin', manager: 'Manager', rep: 'Rep', viewer: 'Read-only', coldcaller: 'Coldcaller', lead_scraper: 'Lead scraper', linkedin_lead_gen: 'LinkedIn lead gen', email_lead_gen: 'Email lead gen' }[r.user.role] || r.user.role} · {r.user.timezone}</div>
                   </td>
                   <td className="right strong">{num(r.touches)}</td>
                   <td className="right">{num(r.byChannel.linkedin)}</td>

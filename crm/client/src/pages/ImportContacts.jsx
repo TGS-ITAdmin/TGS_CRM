@@ -1,4 +1,5 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import CampaignSelect, { CampaignChoiceHint } from '../components/CampaignSelect.jsx'
 import { Link, useNavigate } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth } from '../contexts/AuthContext.jsx'
@@ -33,7 +34,7 @@ const COMPANY_ORDER = [
 ]
 
 export default function ImportContacts() {
-  const { users, isAdmin, user } = useAuth()
+  const { users, isAdmin, user, can } = useAuth()
   const toast = useToast()
   const navigate = useNavigate()
   const fileRef = useRef(null)
@@ -42,8 +43,13 @@ export default function ImportContacts() {
   const [preview, setPreview] = useState(null)
   const [mapping, setMapping] = useState({})
   const [options, setOptions] = useState({
-    owner: user.id, source: 'csv_import', tag: '', onDuplicate: 'skip', reassignOwner: false,
+    owner: user.id, source: 'csv_import', tag: '', onDuplicate: 'skip', reassignOwner: false, campaignId: '',
   })
+  const [campaigns, setCampaigns] = useState([])
+  useEffect(() => {
+    if (can('campaigns.enroll')) api.listCampaigns().then((d) => setCampaigns(d.campaigns || [])).catch(() => {})
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  const chosenCampaign = campaigns.find((c) => c._id === options.campaignId)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState(null)
 
@@ -78,7 +84,7 @@ export default function ImportContacts() {
       fd.append('options', JSON.stringify({ ...options, sheet: preview?.sheet || undefined }))
       const { result } = await api.importCommit(fd)
       setResult(result)
-      toast.success(`${result.created} contacts created`)
+      toast.success(`${result.created} contacts created${result.campaign ? ` · ${result.campaign.enrolled} added to ${result.campaign.name}` : ''}`)
     } catch (err) {
       toast.error(err.message)
     } finally {
@@ -110,6 +116,20 @@ export default function ImportContacts() {
                 <div className="stat"><div className="stat-label">Skipped</div><div className="stat-value">{result.skipped}</div></div>
                 <div className="stat"><div className="stat-label">Suppressed</div><div className="stat-value">{result.suppressed}</div></div>
               </div>
+
+              {result.campaign && (
+                <div className={`banner ${result.campaign.notEnrolled ? 'banner-warn' : 'banner-info'}`} style={{ marginBottom: 12 }}>
+                  <span>📣</span>
+                  <div>
+                    {result.campaign.enrolled} new contact{result.campaign.enrolled === 1 ? '' : 's'} added to
+                    “{result.campaign.name}” at step 1.
+                    {result.skipped + result.updated > 0 && ' Rows that matched existing contacts were not added to the campaign.'}
+                    {result.campaign.notEnrolled > 0 && (
+                      <> {result.campaign.notEnrolled} could not be added: {result.campaign.errors.join('; ')}</>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {result.companiesCreated > 0 && (
                 <div className="banner banner-info">
@@ -299,6 +319,13 @@ export default function ImportContacts() {
                     <input className="input" value={options.tag} placeholder="e.g. healthcare-list-aug"
                       onChange={(e) => setOptions((o) => ({ ...o, tag: e.target.value }))} />
                   </Field>
+                  {can('campaigns.enroll') && (
+                    <Field label="Add new contacts to a campaign" hint="Optional. Newly created contacts start at step 1. Contacts that already exist are not added.">
+                      <CampaignSelect campaigns={campaigns} value={options.campaignId} emptyLabel="Don’t add to a campaign"
+                        onChange={(v) => setOptions((o) => ({ ...o, campaignId: v }))} />
+                      <CampaignChoiceHint campaign={chosenCampaign} />
+                    </Field>
+                  )}
                   <Field label="If a contact already exists">
                     <select className="select" value={options.onDuplicate}
                       onChange={(e) => setOptions((o) => ({ ...o, onDuplicate: e.target.value }))}>

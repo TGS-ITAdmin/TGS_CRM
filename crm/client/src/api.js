@@ -200,6 +200,7 @@ export const api = {
   exitEnrollment: (id, reason) => request('POST', `/api/campaigns/enrollments/${id}/exit`, { reason }),
   snoozeEnrollment: (id, days) => request('POST', `/api/campaigns/enrollments/${id}/snooze`, { days }),
   regenerateStage: (id) => request('POST', `/api/campaigns/enrollments/${id}/regenerate`),
+  skipEnrollmentStep: (id, reason) => request('POST', `/api/campaigns/enrollments/${id}/skip-step`, { reason }),
 
   // work
   myDay: () => request('GET', '/api/work/my-day'),
@@ -207,6 +208,11 @@ export const api = {
   callList: (params) => request('GET', `/api/work/call-list${qs(params)}`),
   completeTask: (id, body) => request('POST', `/api/work/tasks/${id}/complete`, body),
   skipTask: (id, reason) => request('POST', `/api/work/tasks/${id}/skip`, { reason }),
+  skipTaskStep: (id, reason) => request('POST', `/api/work/tasks/${id}/skip-step`, { reason }),
+  claimTask: (id) => request('POST', `/api/work/tasks/${id}/claim`),
+  releaseTask: (id) => request('POST', `/api/work/tasks/${id}/release`),
+  claimEmail: (id) => request('POST', `/api/work/outbox/${id}/claim`),
+  releaseEmail: (id) => request('POST', `/api/work/outbox/${id}/release`),
   snoozeTask: (id, days) => request('POST', `/api/work/tasks/${id}/snooze`, { days }),
   createTask: (body) => request('POST', '/api/work/tasks', body),
   listOutbox: (params) => request('GET', `/api/work/outbox${qs(params)}`),
