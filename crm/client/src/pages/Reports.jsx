@@ -17,6 +17,9 @@ const TABS = [
 ]
 
 const PRESETS = [
+  { label: 'Today', days: 'today' },
+  { label: 'Week to date', days: 'wtd' },
+  { label: 'Month to date', days: 'mtd' },
   { label: 'Last 7 days', days: 7 },
   { label: 'Last 30 days', days: 30 },
   { label: 'Last 90 days', days: 90 },
@@ -27,6 +30,23 @@ function isoDaysAgo(days) {
   return new Date(Date.now() - days * 86400000).toISOString().slice(0, 10)
 }
 
+/* Start of the chosen period, from midnight on this computer's clock:
+ * today, Monday of this week, or the 1st of this month. */
+function rangeStart(days) {
+  const d = new Date()
+  d.setHours(0, 0, 0, 0)
+  if (days === 'today') return d.toISOString()
+  if (days === 'wtd') {
+    d.setDate(d.getDate() - ((d.getDay() + 6) % 7)) // back to Monday
+    return d.toISOString()
+  }
+  if (days === 'mtd') {
+    d.setDate(1)
+    return d.toISOString()
+  }
+  return isoDaysAgo(days)
+}
+
 export default function Reports() {
   const { can } = useAuth()
   const isAdmin = can('reports.viewTeam')
@@ -35,7 +55,8 @@ export default function Reports() {
 
   const tab = params.get('tab') || 'pipeline'
   const campaign = params.get('campaign') || ''
-  const days = Number(params.get('days')) || 30
+  const daysParam = params.get('days')
+  const days = ['today', 'wtd', 'mtd'].includes(daysParam) ? daysParam : Number(daysParam) || 30
 
   const [campaigns, setCampaigns] = useState([])
   const [summary, setSummary] = useState(null)
@@ -57,7 +78,7 @@ export default function Reports() {
 
   const load = useCallback(async () => {
     setLoading(true)
-    const range = { from: isoDaysAgo(days) }
+    const range = { from: rangeStart(days) }
     try {
       const [sum, main] = await Promise.all([
         api.reportSummary(range),
@@ -73,7 +94,7 @@ export default function Reports() {
           ? api.reportChannels({ ...range, campaign: campaign || undefined })
           : tab === 'reps'
           ? api.reportReps(range)
-          : api.reportScoreboard({ ...range, campaign: campaign || undefined, unit: days <= 14 ? 'day' : 'week' }),
+          : api.reportScoreboard({ ...range, campaign: campaign || undefined, unit: typeof days === 'string' || days <= 14 ? 'day' : 'week' }),
       ])
       setSummary(sum)
       setData(main)
