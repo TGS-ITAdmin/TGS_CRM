@@ -50,6 +50,9 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
       onDone?.()
     } catch (err) {
       toast.error(err.message)
+      // Closed or reassigned since the page loaded: refresh so the stale card goes.
+      if (err.status === 400 && /already closed/i.test(err.message)) onDone?.()
+      if (err.status === 404) onDone?.()
     } finally {
       setBusy(false)
     }

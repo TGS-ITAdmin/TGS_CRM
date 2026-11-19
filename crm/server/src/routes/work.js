@@ -1,6 +1,6 @@
 const express = require('express')
 const {
-  Task, OutboxMessage, Contact, Enrollment, Quote, Activity, Campaign, CALL_OUTCOMES,
+  Task, OutboxMessage, Contact, Enrollment, Quote, Activity, Campaign, User, CALL_OUTCOMES,
 } = require('../db')
 const { requireAuth, assignedScope, ownerScope, claimableScope } = require('../middleware/auth')
 const {
@@ -308,10 +308,19 @@ router.get('/call-list', async (req, res) => {
 })
 
 /* ---- Complete a task ---- */
+/* Why a task the screen still shows is no longer open, in plain words. */
+async function closedReason(task) {
+  const by = task.completedBy ? await User.findById(task.completedBy).select('name').lean() : null
+  const when = task.completedAt ? ` on ${new Date(task.completedAt).toDateString()}` : ''
+  if (task.status === 'done') return `That task is already closed — marked done${by ? ` by ${by.name}` : ''}${when}. Your list has been refreshed.`
+  const why = task.notes ? `: ${task.notes}` : ''
+  return `That task is already closed (${task.status === 'skipped' ? 'skipped' : 'cancelled'}${why}). Your list has been refreshed.`
+}
+
 router.post('/tasks/:id/complete', async (req, res) => {
   const task = await Task.findOne({ _id: req.params.id, ...assignedScope(req) })
   if (!task) return res.status(404).json({ error: 'Task not found' })
-  if (task.status !== 'pending') return res.status(400).json({ error: 'That task is already closed' })
+  if (task.status !== 'pending') return res.status(400).json({ error: await closedReason(task) })
 
   const { outcome, notes, callbackDays, advanceNow, person, restartDate } = req.body || {}
   let dealResult = null
@@ -549,7 +558,7 @@ router.post('/outbox/:id/release', (req, res) => release(OutboxMessage, req, res
 router.post('/tasks/:id/skip-step', async (req, res) => {
   const task = await Task.findOne({ _id: req.params.id, ...assignedScope(req) })
   if (!task) return res.status(404).json({ error: 'Task not found' })
-  if (task.status !== 'pending') return res.status(400).json({ error: 'That task is already closed' })
+  if (task.status !== 'pending') return res.status(400).json({ error: await closedReason(task) })
   const enrollment = task.enrollment ? await Enrollment.findById(task.enrollment) : null
   if (!enrollment || enrollment.currentStageIndex !== task.stageIndex) {
     return res.status(400).json({ error: 'This task is not the contact\'s current campaign step, so there is no step to skip. Use Skip instead.' })

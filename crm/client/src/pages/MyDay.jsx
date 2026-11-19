@@ -28,19 +28,42 @@ export default function MyDay({ counts }) {
   const [loading, setLoading] = useState(true)
   const [notifState, setNotifState] = useState(notificationPermission())
 
-  const load = useCallback(async () => {
+  const toast = useToast()
+  const [refreshing, setRefreshing] = useState(false)
+  const [updatedAt, setUpdatedAt] = useState(null)
+  const [refreshKey, setRefreshKey] = useState(0)
+
+  /* Reloads everything on the page: your tasks, the shared queue, emails,
+     Waiting on a reply and (for managers) team escalations. `manual` = the
+     Refresh button, which says so when it is done. */
+  const load = useCallback(async (manual = false) => {
+    if (manual === true) setRefreshing(true)
     try {
-      setData(await api.myDay())
+      const [day] = await Promise.all([
+        api.myDay(),
+        can('reports.viewTeam') ? api.escalations().then(setTeam).catch(() => {}) : null,
+      ])
+      setData(day)
+      setUpdatedAt(new Date())
+      setRefreshKey((k) => k + 1)
+      if (manual === true) toast.success('My Day is up to date')
+    } catch (err) {
+      toast.error(`Could not refresh: ${err.message}`)
     } finally {
       setLoading(false)
+      setRefreshing(false)
     }
-  }, [])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { load() }, [load])
-  // G13: the team's tasks more than 1 business day overdue, for managers.
+  // Keep the list current while the page is open: every 3 minutes, and when
+  // you come back to the tab. Cards keep anything you were typing.
   useEffect(() => {
-    if (can('reports.viewTeam')) api.escalations().then(setTeam).catch(() => {})
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+    const tick = () => { if (document.visibilityState === 'visible') load() }
+    const t = setInterval(tick, 3 * 60 * 1000)
+    document.addEventListener('visibilitychange', tick)
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', tick) }
+  }, [load])
 
   if (loading) return <Loading />
   if (!data) return null
@@ -61,7 +84,14 @@ export default function MyDay({ counts }) {
           </div>
         </div>
         <div className="spacer" />
-        <button className="btn btn-sm" onClick={load}>Refresh</button>
+        {updatedAt && (
+          <span className="small faint" style={{ marginRight: 8 }}>
+            Updated {updatedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+          </span>
+        )}
+        <button className="btn btn-sm" disabled={refreshing} onClick={() => load(true)}>
+          {refreshing ? 'Refreshing…' : 'Refresh'}
+        </button>
       </div>
 
       <div className="page">
@@ -173,7 +203,7 @@ export default function MyDay({ counts }) {
 
         {data.sharedQueue?.total > 0 && <SharedQueue queue={data.sharedQueue} onChange={load} />}
 
-        <WaitingReplies />
+        <WaitingReplies key={refreshKey} />
 
         {c.awaitingApproval > 0 && (
           <div className="queue-section">
