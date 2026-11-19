@@ -76,15 +76,28 @@ router.get('/', async (req, res) => {
   if (EMAIL_STATUS_VALUES.includes(req.query.emailStatus)) filter.emailStatus = req.query.emailStatus
   if (DNC_STATUS_VALUES.includes(req.query.dncStatus)) filter.dncStatus = req.query.dncStatus
 
+  /* Search. The whole text is tried first (so "A & W Plumbing" or an email
+     still match as typed); then every word must match some field, so a full
+     name like "William Todd" finds first name William + last name Todd. */
   const q = (req.query.q || '').trim()
   if (q) {
-    const rx = new RegExp(escapeRegex(q), 'i')
-    const companyIds = await Company.find({ name: rx }).distinct('_id')
-    filter.$or = [
-      { firstName: rx }, { lastName: rx }, { companyName: rx },
-      { email: rx }, { phone: rx }, { title: rx }, { linkedinUrl: rx },
-      ...(companyIds.length ? [{ company: { $in: companyIds } }] : []),
-    ]
+    const anyField = async (text) => {
+      const rx = new RegExp(escapeRegex(text), 'i')
+      const companyIds = await Company.find({ name: rx }).distinct('_id')
+      return [
+        { firstName: rx }, { lastName: rx }, { companyName: rx },
+        { email: rx }, { phone: rx }, { title: rx }, { linkedinUrl: rx },
+        ...(companyIds.length ? [{ company: { $in: companyIds } }] : []),
+      ]
+    }
+    const words = q.split(/\s+/).filter(Boolean).slice(0, 6)
+    if (words.length > 1) {
+      const each = []
+      for (const w of words) each.push({ $or: await anyField(w) })
+      filter.$or = [...await anyField(q), { $and: each }]
+    } else {
+      filter.$or = await anyField(q)
+    }
   }
 
   if (req.query.campaign) {
