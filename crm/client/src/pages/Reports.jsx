@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth } from '../contexts/AuthContext.jsx'
@@ -62,6 +62,7 @@ export default function Reports() {
   const [summary, setSummary] = useState(null)
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
+  const latest = useRef(0)
 
   const set = (patch) => {
     const next = new URLSearchParams(params)
@@ -79,6 +80,8 @@ export default function Reports() {
   const load = useCallback(async () => {
     setLoading(true)
     const range = { from: rangeStart(days) }
+    const key = `${tab}|${campaign}|${days}`
+    const req = ++latest.current
     try {
       const [sum, main] = await Promise.all([
         api.reportSummary(range),
@@ -96,13 +99,15 @@ export default function Reports() {
           ? api.reportReps(range)
           : api.reportScoreboard({ ...range, campaign: campaign || undefined, unit: typeof days === 'string' || days <= 14 ? 'day' : 'week' }),
       ])
+      if (req !== latest.current) return // a newer tab/filter was picked meanwhile
       setSummary(sum)
-      setData(main)
+      setData({ key, value: main })
     } catch (err) {
+      if (req !== latest.current) return
       toast.error(err.message)
-      setData(null)
+      setData({ key, value: null })
     } finally {
-      setLoading(false)
+      if (req === latest.current) setLoading(false)
     }
   }, [tab, campaign, days]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -183,14 +188,15 @@ export default function Reports() {
           ))}
         </div>
 
-        {loading ? <Loading /> : (
+        {/* Each tab only draws data loaded for it — never the previous tab's. */}
+        {loading || data?.key !== `${tab}|${campaign}|${days}` ? <Loading /> : (
           <>
-            {tab === 'pipeline' && <PipelineReport data={data} />}
-            {tab === 'forecast' && <ForecastReport data={data} />}
-            {tab === 'funnel' && <FunnelReport data={data} campaign={campaign} />}
-            {tab === 'channels' && <ChannelsReport data={data} />}
-            {tab === 'reps' && <RepsReport data={data} />}
-            {tab === 'scoreboard' && <Scoreboard data={data} />}
+            {tab === 'pipeline' && <PipelineReport data={data.value} />}
+            {tab === 'forecast' && <ForecastReport data={data.value} />}
+            {tab === 'funnel' && <FunnelReport data={data.value} campaign={campaign} />}
+            {tab === 'channels' && <ChannelsReport data={data.value} />}
+            {tab === 'reps' && <RepsReport data={data.value} />}
+            {tab === 'scoreboard' && <Scoreboard data={data.value} />}
           </>
         )}
       </div>
