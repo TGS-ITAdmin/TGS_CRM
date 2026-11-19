@@ -430,11 +430,16 @@ function RepsReport({ data }) {
           <table className="data">
             <thead>
               <tr>
-                <th>Rep</th><th className="right">Touches</th><th className="right">LinkedIn</th>
+                <th style={{ minWidth: 200 }}>Rep</th>
+                <th className="right" title="All touches: LinkedIn + email + calls">Touches</th>
+                <th className="right">LinkedIn</th>
                 <th className="right">Email</th><th className="right">Calls</th>
-                <th className="right">Contacts touched</th><th className="right">Meetings</th>
-                <th className="right">Conv.</th><th className="right">Tasks done</th>
-                <th className="right">Overdue</th><th className="right">Owns</th>
+                <th className="right" title="Different contacts reached">Contacts</th>
+                <th className="right">Meetings</th>
+                <th className="right" title="Meetings booked ÷ contacts touched">Conv.</th>
+                <th className="right">Tasks done</th>
+                <th className="right">Overdue</th>
+                <th className="right" title="Contacts this person owns">Owns</th>
               </tr>
             </thead>
             <tbody>
@@ -461,6 +466,26 @@ function RepsReport({ data }) {
                 </tr>
               ))}
             </tbody>
+            {data.rows.length > 1 && (() => {
+              const sum = (f) => data.rows.reduce((t, r) => t + (f(r) || 0), 0)
+              return (
+                <tfoot>
+                  <tr>
+                    <td>Team total</td>
+                    <td className="right">{num(sum((r) => r.touches))}</td>
+                    <td className="right">{num(sum((r) => r.byChannel.linkedin))}</td>
+                    <td className="right">{num(sum((r) => r.byChannel.email))}</td>
+                    <td className="right">{num(sum((r) => r.byChannel.call))}</td>
+                    <td className="right" title="Not added up: two people can touch the same contact" />
+                    <td className="right">{num(sum((r) => r.meetingsBooked))}</td>
+                    <td className="right" />
+                    <td className="right">{num(sum((r) => r.tasksCompleted))}</td>
+                    <td className="right">{num(sum((r) => r.tasksOverdue))}</td>
+                    <td className="right">{num(sum((r) => r.contactsOwned))}</td>
+                  </tr>
+                </tfoot>
+              )
+            })()}
           </table>
         </div>
       </div>

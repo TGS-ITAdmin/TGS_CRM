@@ -292,6 +292,10 @@ table.data tbody tr:hover { background: var(--surface-2); }
 table.data tbody tr.selected { background: var(--accent-soft); }
 table.data td.tight { padding: 6px 12px; }
 table.data th.checkcol, table.data td.checkcol { width: 34px; padding-right: 0; }
+/* Number columns: header lines up with its figures, digits line up row to row. */
+table.data th.right, table.data td.right { text-align: right; }
+table.data td.right { font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.data tfoot td { font-weight: 650; background: var(--surface-2); border-bottom: none; border-top: 1px solid var(--border); }
 
 /* ---------------- Work queue ---------------- */
 
