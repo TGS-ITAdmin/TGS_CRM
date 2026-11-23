@@ -31,6 +31,8 @@ export default function CampaignEditor() {
   const [saving, setSaving] = useState(false)
   const [preview, setPreview] = useState(null)
   const [confirming, setConfirming] = useState(null)
+  const [savedStages, setSavedStages] = useState([])
+  const [openWork, setOpenWork] = useState(null) // steps with open work whose wording changed
   // Every campaign, for a branch's "exit and start another campaign" choice.
   const [allCampaigns, setAllCampaigns] = useState([])
   useEffect(() => { api.listCampaigns().then((d) => setAllCampaigns(d.campaigns || [])).catch(() => {}) }, [])
@@ -39,6 +41,7 @@ export default function CampaignEditor() {
     try {
       const data = await api.getCampaign(id)
       setCampaign(data.campaign)
+      setSavedStages(data.campaign.stages || [])
       setStageCounts(data.stageCounts)
       setDirty(false)
     } catch (err) {
@@ -75,10 +78,37 @@ export default function CampaignEditor() {
       return c
     })
 
+  /* Steps whose wording changed (same position, same channel) since the last
+     save: their open tasks and unsent drafts still carry the old text. */
+  function editedSteps() {
+    return campaign.stages
+      .map((st, i) => ({ st, old: savedStages[i], i }))
+      .filter(({ st, old }) => old && old.channel === st.channel &&
+        ((old.body || '') !== (st.body || '') || (old.subject || '') !== (st.subject || '') || old.name !== st.name))
+      .map(({ i }) => i)
+  }
+
   async function save() {
+    const changed = editedSteps()
+    if (changed.length) {
+      setSaving(true)
+      try {
+        const { steps } = await api.campaignOpenWork(id, changed)
+        const withWork = steps.filter((x) => x.tasks + x.drafts > 0)
+        if (withWork.length) { setOpenWork(withWork); return }
+      } catch {
+        // Could not count: just save, nothing is refreshed.
+      } finally {
+        setSaving(false)
+      }
+    }
+    await doSave(null)
+  }
+
+  async function doSave(refresh) {
     setSaving(true)
     try {
-      await api.updateCampaign(id, {
+      const r = await api.updateCampaign(id, {
         name: campaign.name,
         description: campaign.description,
         stages: campaign.stages,
@@ -86,8 +116,21 @@ export default function CampaignEditor() {
         recheck: campaign.recheck,
         cold: campaign.cold === true,
         businessDays: campaign.businessDays !== false,
+        ...(refresh ? { refreshOpenWork: refresh } : {}),
       })
-      toast.success('Campaign saved')
+      const f = r.refreshed
+      if (f) {
+        const parts = []
+        if (f.tasks) parts.push(`${f.tasks} open task${f.tasks === 1 ? '' : 's'}`)
+        if (f.drafts) parts.push(`${f.drafts} unsent email${f.drafts === 1 ? '' : 's'}`)
+        const kept = f.editedKept
+          ? ` ${f.editedKept} email${f.editedKept === 1 ? ' was' : 's were'} left as is (edited by hand, or the contact's details changed).`
+          : ''
+        toast.success(`${parts.join(' and ') || 'Nothing'} updated to the new wording.${kept}`, 'Campaign saved')
+      } else {
+        toast.success('Campaign saved')
+      }
+      setOpenWork(null)
       load()
     } catch (err) {
       toast.error(err.message)
@@ -310,6 +353,36 @@ export default function CampaignEditor() {
           onClose={() => setConfirming(null)}
           onConfirm={() => { removeStage(confirming); setConfirming(null) }}
         />
+      )}
+      {openWork && (
+        <Modal
+          title="Update open tasks too?"
+          onClose={() => !saving && setOpenWork(null)}
+          footer={
+            <>
+              <button className="btn" disabled={saving} onClick={() => setOpenWork(null)}>Cancel</button>
+              <button className="btn" disabled={saving} onClick={() => doSave(null)}>Save only</button>
+              <button className="btn btn-primary" disabled={saving} onClick={() => doSave(openWork.map((x) => x.index))}>
+                {saving ? 'Saving…' : 'Save and update them'}
+              </button>
+            </>
+          }
+        >
+          <p className="small">You changed the wording of {openWork.length === 1 ? 'a step that has' : 'steps that have'} work already waiting:</p>
+          <ul className="small" style={{ paddingLeft: 18 }}>
+            {openWork.map((x) => (
+              <li key={x.index}>
+                <strong>Step {x.index + 1} — {x.name}</strong>:{' '}
+                {[x.tasks && `${x.tasks} open task${x.tasks === 1 ? '' : 's'}`, x.drafts && `${x.drafts} unsent email${x.drafts === 1 ? '' : 's'}`].filter(Boolean).join(' and ')}
+              </li>
+            ))}
+          </ul>
+          <p className="small">
+            <strong>Save and update them</strong> puts the new wording on those tasks and emails, filled in for each contact.
+            Due dates, who they are assigned to and anything already logged stay the same. Emails someone edited by hand are left as they are.
+          </p>
+          <p className="small"><strong>Save only</strong> keeps the old wording on them; only new tasks use the new wording.</p>
+        </Modal>
       )}
     </>
   )

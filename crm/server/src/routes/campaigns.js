@@ -135,6 +135,7 @@ router.put('/:id', requirePermission('campaigns.manage'), async (req, res) => {
     }
   }
 
+  const before = campaign.stages.map((st) => ({ name: st.name, channel: st.channel, subject: st.subject, body: st.body }))
   if (stages !== undefined) {
     const next = sanitizeStages(stages)
     const activeCount = await Enrollment.countDocuments({ campaign: campaign._id, status: 'active' })
@@ -154,10 +155,82 @@ router.put('/:id', requirePermission('campaigns.manage'), async (req, res) => {
     }
     campaign.stages = next
   }
-
   await campaign.save()
-  res.json({ campaign: campaign.toJSON() })
+  // Optional: bring open tasks and unsent drafts on edited steps up to date.
+  const refreshed = Array.isArray(req.body?.refreshOpenWork)
+    ? await refreshOpenWork(campaign, before, req.body.refreshOpenWork)
+    : null
+  res.json({ campaign: campaign.toJSON(), refreshed })
 })
+
+/* Open work on the given steps: tasks not yet done and emails not yet sent.
+ * The editor asks this before saving a changed script. */
+const openTaskQuery = (campaignId, index) => ({ campaign: campaignId, stageIndex: index, status: 'pending', kind: { $in: ['', null] } })
+const openDraftQuery = (campaignId, index) => ({ campaign: campaignId, stageIndex: index, status: { $in: ['queued', 'failed'] } })
+
+router.get('/:id/open-work', async (req, res) => {
+  const campaign = await Campaign.findById(req.params.id).select('stages').lean()
+  if (!campaign) return res.status(404).json({ error: 'Campaign not found' })
+  const indexes = String(req.query.stages || '').split(',').map(Number)
+    .filter((i) => Number.isInteger(i) && i >= 0 && i < campaign.stages.length)
+  const steps = []
+  for (const i of [...new Set(indexes)]) {
+    const [tasks, drafts] = await Promise.all([
+      Task.countDocuments(openTaskQuery(campaign._id, i)),
+      OutboxMessage.countDocuments(openDraftQuery(campaign._id, i)),
+    ])
+    steps.push({ index: i, name: campaign.stages[i].name, tasks, drafts })
+  }
+  res.json({ steps })
+})
+
+/* Re-fill open work from the step's new wording, for each contact. Due dates,
+ * who it is assigned to and anything already logged are kept. A step whose
+ * channel changed is left alone (the work no longer fits it), and so is an
+ * email someone already edited by hand before sending. */
+async function refreshOpenWork(campaign, before, indexes) {
+  const { renderStage } = require('../lib/merge')
+  const out = { tasks: 0, drafts: 0, editedKept: 0, channelChanged: 0 }
+  for (const i of [...new Set(indexes.map(Number))]) {
+    const now = campaign.stages[i]
+    const old = before[i]
+    if (!Number.isInteger(i) || !now || !old) continue
+    if (old.channel !== now.channel) { out.channelChanged++; continue }
+
+    const tasks = await Task.find(openTaskQuery(campaign._id, i))
+    const drafts = await OutboxMessage.find(openDraftQuery(campaign._id, i))
+    const ids = [...new Set([...tasks, ...drafts].map((w) => String(w.contact)))]
+    const contacts = new Map((await Contact.find({ _id: { $in: ids } }).populate('company')).map((c) => [String(c._id), c]))
+
+    for (const t of tasks) {
+      const c = contacts.get(String(t.contact))
+      if (!c) continue
+      const m = renderStage(now, c)
+      t.scriptBody = t.swappedFrom
+        ? `Their email bounced, so this replaces the email "${m.subject || now.name}". Use it as talking points:\n\n${m.body}`
+        : m.body
+      if (old.name !== now.name && t.title.endsWith(` — ${old.name}`)) {
+        t.title = `${t.title.slice(0, -old.name.length)}${now.name}`
+      }
+      t.stageName = now.name
+      await t.save()
+      out.tasks++
+    }
+    for (const d of drafts) {
+      const c = contacts.get(String(d.contact))
+      if (!c) continue
+      const was = renderStage(old, c)
+      if (d.body !== was.body || d.subject !== was.subject) { out.editedKept++; continue }
+      const m = renderStage(now, c)
+      d.subject = m.subject
+      d.body = m.body
+      d.stageName = now.name
+      await d.save()
+      out.drafts++
+    }
+  }
+  return out
+}
 
 /* Delete a campaign. Anyone still running in it is exited first, which
  * cancels their pending tasks and queued emails, so nothing keeps firing for
