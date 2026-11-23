@@ -490,6 +490,11 @@ const enrollmentSchema = new Schema(
     /* Set by a branch: when the stage timer next runs out, 'retry' redoes the
        current step and 'continue' moves on (skipping the No response branch). */
     pendingAction: { type: String, enum: ['', 'retry', 'continue'], default: '' },
+    /* The step's wait ran out but its task or email is still open: the
+       contact stays on the step (dueAt cleared) and moves on as soon as that
+       work is done, skipped, sent or cancelled. */
+    heldForWork: { type: Boolean, default: false, index: true },
+    heldSince: { type: Date, default: null },
     // Retries used per stage index, e.g. { "2": 1 }.
     retries: { type: Object, default: {} },
     // Last time someone checked for a reply and found none ("No reply yet").

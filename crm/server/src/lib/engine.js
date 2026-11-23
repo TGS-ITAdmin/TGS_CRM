@@ -738,29 +738,91 @@ async function retryStage({ enrollment, actorId = null }) {
   return { retried: true, work }
 }
 
+/* Open work for the step a contact is on: a campaign task not yet done or
+ * skipped, or an email not yet sent or cancelled (queued or failed). */
+async function hasOpenStageWork(enrollment) {
+  const q = { enrollment: enrollment._id, stageIndex: enrollment.currentStageIndex }
+  const [task, email] = await Promise.all([
+    Task.exists({ ...q, status: 'pending', kind: { $in: ['', null] } }),
+    // A failed send is still unsent: it waits to be retried or cancelled.
+    OutboxMessage.exists({ ...q, status: { $in: ['queued', 'failed'] } }),
+  ])
+  return !!(task || email)
+}
+
+/* What happens when a step's wait is over. If the step's own work is still
+ * open the contact waits on this step instead of moving on (and the task is
+ * not dropped); otherwise a pending retry / "No response" branch decides, or
+ * the contact moves to the next step. */
+async function processDue(enrollment, now = new Date()) {
+  if (!enrollment.pendingAction && await hasOpenStageWork(enrollment)) {
+    enrollment.dueAt = null
+    enrollment.heldForWork = true
+    enrollment.heldSince = enrollment.heldSince || now
+    await enrollment.save()
+    return { held: true }
+  }
+  if (enrollment.heldForWork) {
+    enrollment.heldForWork = false
+    enrollment.heldSince = null
+  }
+  const { onStageDue } = require('./outcomes')
+  if (await onStageDue(enrollment)) return { advanced: true }
+  return advance({ enrollment, manual: false })
+}
+
+/* Call after a task or email is closed: if its contact was waiting on that
+ * work, move them on now rather than at the next scheduler run. */
+async function releaseHeld(enrollmentId) {
+  if (!enrollmentId) return null
+  const enrollment = await Enrollment.findOne({ _id: enrollmentId, status: 'active', heldForWork: true, dueAt: null })
+  if (!enrollment || await hasOpenStageWork(enrollment)) return null
+  const campaign = await Campaign.findById(enrollment.campaign).select('active').lean()
+  if (!campaign?.active) {
+    // Paused campaign: release it to the scheduler, which waits for the campaign.
+    enrollment.heldForWork = false
+    enrollment.heldSince = null
+    enrollment.dueAt = new Date()
+    await enrollment.save()
+    return null
+  }
+  return processDue(enrollment)
+}
+
 async function runDueEnrollments({ limit = 500, now = new Date() } = {}) {
   /* A paused (inactive) campaign does not move anyone on. Its contacts stay
      where they are and catch up when it is switched back on. */
   const paused = await Campaign.find({ active: false }).distinct('_id')
+  const notPaused = paused.length ? { campaign: { $nin: paused } } : {}
+
+  // Waiting flags left on contacts that moved some other way (skip, snooze…).
+  await Enrollment.updateMany(
+    { heldForWork: true, $or: [{ dueAt: { $ne: null } }, { status: { $ne: 'active' } }] },
+    { $set: { heldForWork: false, heldSince: null } }
+  )
+
+  // Contacts waiting on their step's work, whose work has since been closed.
+  const waiting = await Enrollment.find({ status: 'active', heldForWork: true, dueAt: null, ...notPaused }).limit(2000)
+  const ready = []
+  for (const e of waiting) if (!(await hasOpenStageWork(e))) ready.push(e)
+
   const due = await Enrollment.find({
     status: 'active',
     dueAt: { $ne: null, $lte: now },
-    ...(paused.length ? { campaign: { $nin: paused } } : {}),
+    ...notPaused,
   })
     .limit(limit)
     .exec()
 
   let advanced = 0
   let completed = 0
+  let held = 0
   const errors = []
 
-  const { onStageDue } = require('./outcomes')
-  for (const enrollment of due) {
+  for (const enrollment of [...ready, ...due]) {
     try {
-      // A pending retry / wait, or a customised "No response" branch, decides
-      // first; otherwise the usual move to the next stage.
-      if (await onStageDue(enrollment)) { advanced++; continue }
-      const result = await advance({ enrollment, manual: false })
+      const result = await processDue(enrollment, now)
+      if (result.held) held++
       if (result.advanced) advanced++
       if (result.completed) completed++
     } catch (err) {
@@ -768,7 +830,7 @@ async function runDueEnrollments({ limit = 500, now = new Date() } = {}) {
     }
   }
 
-  return { examined: due.length, advanced, completed, errors }
+  return { examined: due.length + ready.length, advanced, completed, held, errors }
 }
 
 /* When a contact opts out or is marked DNC, stop everything in flight. */
@@ -791,6 +853,8 @@ async function suppressContactEverywhere({ contactId, reason, actorId, keepCallT
 
 module.exports = {
   skipStep,
+  releaseHeld,
+  hasOpenStageWork,
   stageAssignee,
   scheduleRecheck,
   retryStage,

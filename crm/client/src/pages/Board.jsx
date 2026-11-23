@@ -171,7 +171,9 @@ export default function Board() {
                           className="small"
                           style={{ marginTop: 5, color: dueLabel(card.dueAt, user.timezone).startsWith('overdue') ? 'var(--danger)' : 'var(--text-faint)' }}
                         >
-                          Moves on: {dueLabel(card.dueAt, user.timezone).replace(/^due /, '')}
+                          Moves on: {card.heldForWork && !card.dueAt
+                            ? 'when this step is done'
+                            : dueLabel(card.dueAt, user.timezone).replace(/^due /, '')}
                         </div>
                       </div>
                     ))}

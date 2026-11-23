@@ -243,6 +243,7 @@ router.get('/:id/board', async (req, res) => {
       col.cards.push({
         enrollmentId: e._id,
         dueAt: e.dueAt,
+        heldForWork: !!e.heldForWork,
         enteredStageAt: e.enteredStageAt,
         contact: e.contact,
       })

@@ -4,7 +4,7 @@ const {
 } = require('../db')
 const { requireAuth, assignedScope, ownerScope, claimableScope } = require('../middleware/auth')
 const {
-  logActivity, advance, enroll, suppressContactEverywhere, handleReply, lockCompany, skipStep,
+  logActivity, advance, enroll, suppressContactEverywhere, handleReply, lockCompany, skipStep, releaseHeld,
 } = require('../lib/engine')
 const { ROLE_PRESETS } = require('../lib/permissions')
 const rules = require('../lib/rules')
@@ -445,6 +445,8 @@ router.post('/tasks/:id/complete', async (req, res) => {
     }
   }
 
+  // A contact waiting on this task moves to the next step now.
+  await releaseHeld(task.enrollment)
   res.json({ ok: true, task, callbackTask, advanced, deal: dealResult, next: outcomeResult?.plan || [] })
 })
 
@@ -510,6 +512,7 @@ router.post('/tasks/:id/skip', async (req, res) => {
   task.completedAt = new Date()
   task.completedBy = req.user._id
   await task.save()
+  await releaseHeld(task.enrollment)
   res.json({ ok: true })
 })
 
@@ -701,6 +704,7 @@ router.post('/outbox/:id/send', async (req, res) => {
   if (msg.status === 'failed') { msg.status = 'queued'; msg.error = '' }
 
   const result = await deliver(msg, req.user)
+  if (msg.status !== 'queued' && msg.status !== 'failed') await releaseHeld(msg.enrollment)
   if (!result.ok) return res.status(400).json({ error: result.error, message: msg })
   res.json({ ok: true, message: msg })
 })
@@ -721,6 +725,7 @@ router.post('/outbox/send-batch', async (req, res) => {
   const out = { sent: 0, failed: 0, suppressed: 0, notAttempted: 0, errors: [] }
   for (const msg of msgs) {
     const result = await deliver(msg, req.user)
+    if (msg.status !== 'queued' && msg.status !== 'failed') await releaseHeld(msg.enrollment)
     if (result.ok) out.sent++
     else if (result.notAttempted) {
       // Configuration problem — the same one will stop every message, so stop
@@ -740,10 +745,11 @@ router.post('/outbox/send-batch', async (req, res) => {
 router.post('/outbox/:id/cancel', async (req, res) => {
   const msg = await OutboxMessage.findOne({ _id: req.params.id, ...assignedScope(req) })
   if (!msg) return res.status(404).json({ error: 'Message not found' })
-  if (msg.status !== 'queued') return res.status(400).json({ error: 'That message is not queued' })
+  if (!['queued', 'failed'].includes(msg.status)) return res.status(400).json({ error: 'That message is not waiting to be sent' })
   msg.status = 'cancelled'
   msg.error = req.body?.reason || 'Cancelled by user'
   await msg.save()
+  await releaseHeld(msg.enrollment)
   res.json({ ok: true })
 })
 

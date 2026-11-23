@@ -30,7 +30,9 @@ function range(req) {
   const from = req.query.from
     ? new Date(req.query.from)
     : new Date(to.getTime() - 30 * 86400000)
-  to.setHours(23, 59, 59, 999)
+  // A plain date means "to the end of that day"; an exact time is kept as is
+  // (the screen sends one for Yesterday, to end at midnight on its clock).
+  if (!req.query.to || !String(req.query.to).includes('T')) to.setHours(23, 59, 59, 999)
   return { from, to }
 }
 
@@ -351,6 +353,19 @@ router.get('/reps', async (req, res) => {
     ])).map((r) => [String(r._id), r])
   )
 
+  /* Of each person's contacts, how many anyone has reached so far (a logged
+     call, LinkedIn step or sent email by any user, at any time). */
+  const everTouched = await Activity.distinct('contact', { type: { $in: TOUCH_TYPES } })
+  const reachedOwned = []
+  for (let i = 0; i < everTouched.length; i += 5000) {
+    reachedOwned.push(...await Contact.aggregate([
+      { $match: { _id: { $in: everTouched.slice(i, i + 5000) } } },
+      { $group: { _id: '$owner', n: { $sum: 1 } } },
+    ]))
+  }
+  const reachedBy = new Map()
+  for (const r of reachedOwned) reachedBy.set(String(r._id), (reachedBy.get(String(r._id)) || 0) + r.n)
+
   const map = (rows, key = '_id') => new Map(rows.map((r) => [String(r[key]), r.n]))
   const overdueBy = map(overdue)
   const completedBy = map(completed)
@@ -376,6 +391,7 @@ router.get('/reps', async (req, res) => {
       tasksOverdue: overdueBy.get(key) || 0,
       meetingsBooked: booked,
       contactsOwned: ownedBy.get(key) || 0,
+      ownedReached: reachedBy.get(key) || 0,
       dealsWon: wonBy.get(key) || 0,
       dealsLost: lostBy.get(key) || 0,
       wonValueUsd: wonValueBy.get(key) || 0,

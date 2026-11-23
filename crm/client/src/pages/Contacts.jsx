@@ -182,12 +182,16 @@ export default function Contacts() {
                   <button className="btn btn-sm" onClick={() => setDialog('move')}>Move campaign</button>
                 </>
               )}
-              <button className="btn btn-sm" onClick={() => setDialog('bulk-status')}>Set status</button>
-              <button className="btn btn-sm" onClick={() => setDialog('bulk-email')}>Email status</button>
-              <button className="btn btn-sm" onClick={() => setDialog('bulk-dnc')}>DNC status</button>
-              {can('contacts.viewAll') && <button className="btn btn-sm" onClick={() => setDialog('bulk-owner')}>Reassign</button>}
-              <button className="btn btn-sm" onClick={() => setDialog('tag')}>Tag</button>
-              <button className="btn btn-sm" onClick={() => setDialog('set-company')}>Set company</button>
+              {can('contacts.edit') && (
+                <>
+                  <button className="btn btn-sm" onClick={() => setDialog('bulk-status')}>Set status</button>
+                  <button className="btn btn-sm" onClick={() => setDialog('bulk-email')}>Email status</button>
+                  <button className="btn btn-sm" onClick={() => setDialog('bulk-dnc')}>DNC status</button>
+                  {can('contacts.viewAll') && <button className="btn btn-sm" onClick={() => setDialog('bulk-owner')}>Reassign</button>}
+                  <button className="btn btn-sm" onClick={() => setDialog('tag')}>Tag</button>
+                  <button className="btn btn-sm" onClick={() => setDialog('set-company')}>Set company</button>
+                </>
+              )}
               {can('contacts.delete') && <button className="btn btn-sm btn-danger" onClick={() => setDialog('delete')}>Delete</button>}
               <button className="btn btn-ghost btn-sm" onClick={() => setSelected(new Set())}>Clear</button>
             </div>

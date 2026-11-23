@@ -278,6 +278,9 @@ export default function ContactDetail() {
                                 Stage {e.currentStageIndex + 1} of {e.totalStages} — {e.currentStage.name}
                                 {' · '}<Channel value={e.currentStage.channel} />
                                 {e.status === 'active' && e.dueAt && <> · moves on {relativeDate(e.dueAt)}</>}
+                                {e.status === 'active' && !e.dueAt && e.heldForWork && (
+                                  <span style={{ color: 'var(--warn)' }}> · waiting for this step’s task or email to be done</span>
+                                )}
                               </>
                             ) : (
                               e.exitReason || 'Finished'

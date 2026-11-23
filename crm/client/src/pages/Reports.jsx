@@ -18,33 +18,56 @@ const TABS = [
 
 const PRESETS = [
   { label: 'Today', days: 'today' },
+  { label: 'Yesterday', days: 'yesterday' },
   { label: 'Week to date', days: 'wtd' },
   { label: 'Month to date', days: 'mtd' },
   { label: 'Last 7 days', days: 7 },
   { label: 'Last 30 days', days: 30 },
   { label: 'Last 90 days', days: 90 },
   { label: 'Last 12 months', days: 365 },
+  { label: 'Custom dates…', days: 'custom' },
 ]
 
 function isoDaysAgo(days) {
   return new Date(Date.now() - days * 86400000).toISOString().slice(0, 10)
 }
 
-/* Start of the chosen period, from midnight on this computer's clock:
- * today, Monday of this week, or the 1st of this month. */
-function rangeStart(days) {
-  const d = new Date()
-  d.setHours(0, 0, 0, 0)
-  if (days === 'today') return d.toISOString()
+const localDay = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+const midnight = (ymd) => { const [y, m, d] = ymd.split('-').map(Number); return new Date(y, m - 1, d) }
+
+/* The period as exact times on this computer's clock. Today, Week to date
+ * (from Monday) and Month to date run from midnight until now; Yesterday is
+ * the whole of yesterday; Custom is from the start of its first day to the
+ * end of its last day. */
+function rangeOf(days, custom) {
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  if (days === 'custom' && custom) {
+    const end = midnight(custom.to)
+    end.setDate(end.getDate() + 1)
+    return { from: midnight(custom.from).toISOString(), to: new Date(end.getTime() - 1).toISOString() }
+  }
+  if (days === 'yesterday') {
+    const from = new Date(today)
+    from.setDate(from.getDate() - 1)
+    return { from: from.toISOString(), to: new Date(today.getTime() - 1).toISOString() }
+  }
+  if (days === 'today') return { from: today.toISOString() }
   if (days === 'wtd') {
-    d.setDate(d.getDate() - ((d.getDay() + 6) % 7)) // back to Monday
-    return d.toISOString()
+    today.setDate(today.getDate() - ((today.getDay() + 6) % 7)) // back to Monday
+    return { from: today.toISOString() }
   }
   if (days === 'mtd') {
-    d.setDate(1)
-    return d.toISOString()
+    today.setDate(1)
+    return { from: today.toISOString() }
   }
-  return isoDaysAgo(days)
+  return { from: isoDaysAgo(days) }
+}
+
+/* Length of the period in days, to pick daily or weekly scoreboard points. */
+function spanDays(days, custom) {
+  if (days === 'custom' && custom) return Math.round((midnight(custom.to) - midnight(custom.from)) / 86400000) + 1
+  return typeof days === 'string' ? 1 : days
 }
 
 export default function Reports() {
@@ -56,7 +79,14 @@ export default function Reports() {
   const tab = params.get('tab') || 'pipeline'
   const campaign = params.get('campaign') || ''
   const daysParam = params.get('days')
-  const days = ['today', 'wtd', 'mtd'].includes(daysParam) ? daysParam : Number(daysParam) || 30
+  // Custom needs a valid from ≤ to, neither in the future; otherwise it waits for one.
+  const todayStr = localDay(new Date())
+  const cFrom = params.get('from') || ''
+  const cTo = params.get('to') || ''
+  const customOk = /^\d{4}-\d{2}-\d{2}$/.test(cFrom) && /^\d{4}-\d{2}-\d{2}$/.test(cTo) && cFrom <= cTo && cTo <= todayStr
+  const custom = customOk ? { from: cFrom, to: cTo } : null
+  const days = ['today', 'yesterday', 'wtd', 'mtd', 'custom'].includes(daysParam) ? daysParam : Number(daysParam) || 30
+  const waitingForDates = days === 'custom' && !custom
 
   const [campaigns, setCampaigns] = useState([])
   const [summary, setSummary] = useState(null)
@@ -79,8 +109,9 @@ export default function Reports() {
 
   const load = useCallback(async () => {
     setLoading(true)
-    const range = { from: rangeStart(days) }
-    const key = `${tab}|${campaign}|${days}`
+    if (waitingForDates) { setLoading(false); return }
+    const range = rangeOf(days, custom)
+    const key = `${tab}|${campaign}|${days}|${cFrom}|${cTo}`
     const req = ++latest.current
     try {
       const [sum, main] = await Promise.all([
@@ -97,7 +128,7 @@ export default function Reports() {
           ? api.reportChannels({ ...range, campaign: campaign || undefined })
           : tab === 'reps'
           ? api.reportReps(range)
-          : api.reportScoreboard({ ...range, campaign: campaign || undefined, unit: typeof days === 'string' || days <= 14 ? 'day' : 'week' }),
+          : api.reportScoreboard({ ...range, campaign: campaign || undefined, unit: spanDays(days, custom) <= 14 ? 'day' : 'week' }),
       ])
       if (req !== latest.current) return // a newer tab/filter was picked meanwhile
       setSummary(sum)
@@ -109,7 +140,7 @@ export default function Reports() {
     } finally {
       if (req === latest.current) setLoading(false)
     }
-  }, [tab, campaign, days]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tab, campaign, days, cFrom, cTo]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { load() }, [load])
 
@@ -124,9 +155,26 @@ export default function Reports() {
           </div>
         </div>
         <div className="spacer" />
-        <select className="select" style={{ maxWidth: 150 }} value={days} onChange={(e) => set({ days: e.target.value })}>
+        <select className="select" style={{ maxWidth: 160 }} value={days}
+          onChange={(e) => {
+            const v = e.target.value
+            if (v === 'custom') {
+              // Start from the period on screen, e.g. the last 7 days.
+              const r = rangeOf(days === 'custom' ? 30 : days, custom)
+              set({ days: v, from: cFrom || localDay(new Date(r.from)), to: cTo || todayStr })
+            } else set({ days: v, from: '', to: '' })
+          }}>
           {PRESETS.map((p) => <option key={p.days} value={p.days}>{p.label}</option>)}
         </select>
+        {days === 'custom' && (
+          <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+            <input className="input" type="date" style={{ maxWidth: 150 }} value={cFrom} max={cTo || todayStr}
+              aria-label="From" onChange={(e) => set({ from: e.target.value })} />
+            <span className="small faint">to</span>
+            <input className="input" type="date" style={{ maxWidth: 150 }} value={cTo} min={cFrom} max={todayStr}
+              aria-label="To" onChange={(e) => set({ to: e.target.value })} />
+          </div>
+        )}
         <select className="select" style={{ maxWidth: 230 }} value={campaign} onChange={(e) => set({ campaign: e.target.value })}>
           <option value="">{tab === 'funnel' ? 'Pick a campaign…' : 'All campaigns'}</option>
           {campaigns.map((c) => <option key={c._id} value={c._id}>{c.name}</option>)}
@@ -189,7 +237,9 @@ export default function Reports() {
         </div>
 
         {/* Each tab only draws data loaded for it — never the previous tab's. */}
-        {loading || data?.key !== `${tab}|${campaign}|${days}` ? <Loading /> : (
+        {waitingForDates ? (
+          <div className="card"><Empty icon="📅" title="Pick the dates">Choose a start and end date above. The end date can be today at the latest.</Empty></div>
+        ) : loading || data?.key !== `${tab}|${campaign}|${days}|${cFrom}|${cTo}` ? <Loading /> : (
           <>
             {tab === 'pipeline' && <PipelineReport data={data.value} />}
             {tab === 'forecast' && <ForecastReport data={data.value} />}
@@ -440,6 +490,7 @@ function RepsReport({ data }) {
                 <th className="right">Tasks done</th>
                 <th className="right">Overdue</th>
                 <th className="right" title="Contacts this person owns">Owns</th>
+                <th className="right" title="Of the contacts this person owns, how many anyone on the team has reached so far (any date)">Owned reached</th>
               </tr>
             </thead>
             <tbody>
@@ -463,6 +514,10 @@ function RepsReport({ data }) {
                     {num(r.tasksOverdue)}
                   </td>
                   <td className="right faint">{num(r.contactsOwned)}</td>
+                  <td className="right">
+                    {num(r.ownedReached || 0)}
+                    <span className="faint"> · {pct(r.contactsOwned ? Math.round(((r.ownedReached || 0) / r.contactsOwned) * 100) : 0)}</span>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -482,6 +537,10 @@ function RepsReport({ data }) {
                     <td className="right">{num(sum((r) => r.tasksCompleted))}</td>
                     <td className="right">{num(sum((r) => r.tasksOverdue))}</td>
                     <td className="right">{num(sum((r) => r.contactsOwned))}</td>
+                    <td className="right">
+                      {num(sum((r) => r.ownedReached))}
+                      <span className="faint"> · {pct(sum((r) => r.contactsOwned) ? Math.round((sum((r) => r.ownedReached) / sum((r) => r.contactsOwned)) * 100) : 0)}</span>
+                    </td>
                   </tr>
                 </tfoot>
               )

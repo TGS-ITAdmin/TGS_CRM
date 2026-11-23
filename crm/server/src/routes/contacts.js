@@ -373,9 +373,9 @@ router.put('/:id', requirePermission('contacts.edit'), async (req, res) => {
   }
 
   if (body.owner !== undefined && req.can('contacts.viewAll') && String(contact.owner) !== String(body.owner)) {
+    const before = { _id: contact._id, owner: contact.owner }
     contact.owner = body.owner || null
-    await Task.updateMany({ contact: contact._id, status: 'pending' }, { $set: { assignedTo: contact.owner } })
-    await OutboxMessage.updateMany({ contact: contact._id, status: 'queued' }, { $set: { assignedTo: contact.owner } })
+    await moveOwnerWork([before], contact.owner)
     await logActivity({
       contact: contact._id, company: contact.company || null,
       type: 'owner_change', user: req.user._id, title: 'Owner changed',
@@ -494,15 +494,40 @@ router.post('/:id/notes', async (req, res) => {
 })
 
 /* ---- Bulk actions ---- */
+/* A new owner takes over the old owner's open work on these contacts.
+ * Work a campaign gave to a role's shared queue (claimed or not) or to a
+ * named person for that step stays where it is. */
+async function moveOwnerWork(contacts, newOwner) {
+  const byOwner = new Map()
+  for (const c of contacts) {
+    const k = String(c.owner || '')
+    if (!byOwner.has(k)) byOwner.set(k, [])
+    byOwner.get(k).push(c._id)
+  }
+  for (const [oldOwner, ids] of byOwner) {
+    const mine = {
+      contact: { $in: ids },
+      assignRole: { $in: ['', null] },
+      assignedTo: oldOwner ? { $in: [oldOwner, null] } : null,
+    }
+    await Task.updateMany({ ...mine, status: 'pending' }, { $set: { assignedTo: newOwner } })
+    await OutboxMessage.updateMany({ ...mine, status: 'queued' }, { $set: { assignedTo: newOwner } })
+  }
+}
+
 router.post('/bulk', async (req, res) => {
   const { ids, action, value } = req.body || {}
   if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'No contacts selected' })
   if (ids.length > 5000) return res.status(400).json({ error: 'Select at most 5,000 contacts at a time' })
 
   const scope = { _id: { $in: ids }, ...ownerScope(req) }
-  const contacts = await Contact.find(scope).select('_id company').lean()
+  const contacts = await Contact.find(scope).select('_id company owner').lean()
   const contactIds = contacts.map((l) => l._id)
   if (!contactIds.length) return res.status(404).json({ error: 'No matching contacts' })
+  // Every bulk change except delete (which has its own right) edits contacts.
+  if (action !== 'delete' && !req.can('contacts.edit')) {
+    return res.status(403).json({ error: 'You do not have permission to change contacts', permission: 'contacts.edit' })
+  }
 
   if (action === 'status') {
     if (!value) return res.status(400).json({ error: 'A status is required' })
@@ -545,8 +570,7 @@ router.post('/bulk', async (req, res) => {
       return res.status(403).json({ error: 'You cannot reassign contacts to other people', permission: 'contacts.viewAll' })
     }
     await Contact.updateMany({ _id: { $in: contactIds } }, { $set: { owner: value || null } })
-    await Task.updateMany({ contact: { $in: contactIds }, status: 'pending' }, { $set: { assignedTo: value || null } })
-    await OutboxMessage.updateMany({ contact: { $in: contactIds }, status: 'queued' }, { $set: { assignedTo: value || null } })
+    await moveOwnerWork(contacts, value || null)
     await Activity.insertMany(
       contacts.map((c) => ({ contact: c._id, company: c.company || null, type: 'owner_change', user: req.user._id, title: 'Owner changed (bulk)' }))
     )
