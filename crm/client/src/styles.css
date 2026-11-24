@@ -26,6 +26,8 @@
   --email-soft: #f0e9fe;
   --call: #059669;
   --call-soft: #e2f5ee;
+  --scrape: #b45309;
+  --scrape-soft: #fdf1e2;
 
   --danger: #dc2626;
   --danger-hover: #b91c1c;
@@ -58,6 +60,8 @@
     --linkedin-soft: #10263c;
     --email-soft: #251b3d;
     --call-soft: #0e2b23;
+    --scrape: #f0a54a;
+    --scrape-soft: #33240f;
     --danger-soft: #33191a;
     --warn-soft: #33260f;
     --ok-soft: #12291a;
@@ -257,6 +261,7 @@ a:hover { text-decoration: underline; }
 .chan-linkedin { background: var(--linkedin-soft); color: var(--linkedin); }
 .chan-email { background: var(--email-soft); color: var(--email); }
 .chan-call { background: var(--call-soft); color: var(--call); }
+.chan-scrape { background: var(--scrape-soft); color: var(--scrape); }
 .chan-internal { background: var(--surface-2); color: var(--text-muted); }
 
 .tag {
@@ -368,6 +373,7 @@ table.data tfoot td { font-weight: 650; background: var(--surface-2); border-bot
 .tl-dot.linkedin { border-color: var(--linkedin); }
 .tl-dot.email { border-color: var(--email); }
 .tl-dot.call { border-color: var(--call); }
+.tl-dot.scrape { border-color: var(--scrape); }
 .tl-dot.alert { border-color: var(--danger); background: var(--danger); }
 .tl-title { font-size: 13px; font-weight: 570; }
 .tl-meta { font-size: 11.5px; color: var(--text-faint); margin-top: 1px; }

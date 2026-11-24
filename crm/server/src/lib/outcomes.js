@@ -57,6 +57,11 @@ const OUTCOMES = {
     O('replied_not_now', 'Replied not now', 'conversation', { needsDate: true }),
     O('replied_not_interested', 'Replied not interested', 'conversation'),
   ],
+  scrape: [
+    O('found', 'Found the details', 'neutral'),
+    O('partly_found', 'Found some details', 'neutral'),
+    O('not_found', 'Could not find details', 'neutral'),
+  ],
   any: [O('no_response', 'No response (the wait runs out)', 'timer')],
 }
 
@@ -95,6 +100,9 @@ const DEFAULT_TEXT = {
   bounced: 'Email marked Bounced; remaining email steps become calls or LinkedIn (G8)',
   invite_accepted: 'LinkedIn connected = Yes; no change to the flow',
   no_response: 'Next stage',
+  found: 'Move to the next stage now',
+  partly_found: 'Move to the next stage now',
+  not_found: 'Leave the campaign (Contact info not found)',
 }
 
 function findOutcome(channel, key) {
@@ -343,6 +351,20 @@ async function applyOutcome({
         break
       case 'invite_accepted':
         await step('LinkedIn connected = Yes', () => setLinkedinConnected(contact))
+        break
+      case 'found':
+      case 'partly_found':
+        if (enrollment?.status === 'active') {
+          const next = campaign?.stages?.[stageIndex + 1]
+          await step(next ? `Move to the next stage, "${next.name}", now` : 'Finish the campaign now',
+            () => engine.advance({ enrollment, actorId, manual: true }))
+        }
+        break
+      case 'not_found':
+        if (enrollment && ['active', 'paused'].includes(enrollment.status)) {
+          await step(`${fullName(contact)} leaves ${where} (Contact info not found)`,
+            () => engine.exitEnrollment({ enrollment, reason: 'Contact info not found', actorId }), true)
+        }
         break
       default:
         if (def.kind === 'neutral') await step('No change: the stage timer moves them on')

@@ -9,6 +9,7 @@ const CHANNELS = [
   { value: 'linkedin', label: 'LinkedIn message' },
   { value: 'email', label: 'Email' },
   { value: 'call', label: 'Cold call' },
+  { value: 'scrape', label: 'Lead scraping' },
 ]
 
 const CHANNEL_HELP = {
@@ -17,6 +18,8 @@ const CHANNEL_HELP = {
   email:
     'Becomes a draft in Ready to Send. Nothing goes out until a person reviews and clicks send.',
   call: 'Becomes a call task with this script attached, and appears in the timezone-aware call list.',
+  scrape:
+    'Becomes a task to find the contact\u2019s missing details (email, phone, LinkedIn, job title). What they find is saved to the contact. It does not count as contacting them. Write the instructions below.',
 }
 
 export default function CampaignEditor() {
@@ -262,7 +265,15 @@ export default function CampaignEditor() {
                   </Field>
                   <Field label="Channel">
                     <select className="select" value={stage.channel} disabled={!isAdmin}
-                      onChange={(e) => setStage(i, 'channel', e.target.value)}>
+                      onChange={(e) => {
+                        setStage(i, 'channel', e.target.value)
+                        // Lead scraping goes to the Lead scraper queue (can be changed below).
+                        if (e.target.value === 'scrape') {
+                          setStage(i, 'assignMode', 'role')
+                          setStage(i, 'assignRole', 'lead_scraper')
+                          setStage(i, 'assignUser', null)
+                        }
+                      }}>
                       {CHANNELS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
                     </select>
                   </Field>
@@ -307,7 +318,7 @@ export default function CampaignEditor() {
                   </Field>
                 )}
 
-                <Field label={stage.channel === 'call' ? 'Call script' : 'Message'}>
+                <Field label={stage.channel === 'call' ? 'Call script' : stage.channel === 'scrape' ? 'Instructions for the lead scraper' : 'Message'}>
                   <textarea
                     className="textarea mono" style={{ minHeight: 150 }} value={stage.body} disabled={!isAdmin}
                     onChange={(e) => setStage(i, 'body', e.target.value)}
@@ -792,7 +803,7 @@ function BranchForm({ def, initial, stage, index, stages, campaignId, campaigns,
  * Stages left to right with the default "next" arrows (and their waits),
  * plus every customised branch: jumps as arcs above, retries as loops,
  * waits and exits listed under the stage they start from. */
-const CH_COLOR = { email: 'var(--email)', call: 'var(--call)', linkedin: 'var(--linkedin)' }
+const CH_COLOR = { email: 'var(--email)', call: 'var(--call)', linkedin: 'var(--linkedin)', scrape: 'var(--scrape)' }
 
 function FlowDiagram({ stages, campaigns }) {
   const { outcomeCatalogue } = useAuth()
@@ -872,7 +883,7 @@ function FlowDiagram({ stages, campaigns }) {
                 <rect x={x(i)} y={y0} width={W} height={H} rx={8} style={{ fill: 'var(--surface)', stroke: CH_COLOR[st.channel] || 'var(--border-strong)', strokeWidth: 1.6 }} />
                 <text x={x(i) + 10} y={y0 + 22} style={{ fontSize: 12, fontWeight: 600, fill: 'var(--text)' }}>{short(`${i + 1}. ${st.name}`)}</text>
                 <text x={x(i) + 10} y={y0 + 40} style={{ fontSize: 10.5, fill: CH_COLOR[st.channel] || 'var(--text-muted)' }}>
-                  {st.channel === 'linkedin' ? 'LinkedIn' : st.channel === 'call' ? 'Call' : 'Email'}{(st.branches || []).length ? ` · ${st.branches.length} branch${st.branches.length === 1 ? '' : 'es'}` : ''}
+                  {st.channel === 'linkedin' ? 'LinkedIn' : st.channel === 'call' ? 'Call' : st.channel === 'scrape' ? 'Lead scraping' : 'Email'}{(st.branches || []).length ? ` · ${st.branches.length} branch${st.branches.length === 1 ? '' : 'es'}` : ''}
                 </text>
                 <line x1={x(i) + W} y1={y0 + H / 2} x2={x(i) + W + G - 4} y2={y0 + H / 2} style={{ stroke: 'var(--text-muted)', strokeWidth: 1.3 }} markerEnd="url(#arrow)" />
                 <text x={x(i) + W + G / 2} y={y0 + H / 2 - 6} textAnchor="middle" style={{ fontSize: 10, fill: 'var(--text-muted)' }}>{st.waitDays}d</text>

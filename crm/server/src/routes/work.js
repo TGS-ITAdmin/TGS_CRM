@@ -308,6 +308,22 @@ router.get('/call-list', async (req, res) => {
 })
 
 /* ---- Complete a task ---- */
+const FOUND_LABELS = { email: 'Email', phone: 'Phone', mobile: 'Mobile', linkedinUrl: 'LinkedIn', title: 'Job title' }
+
+/* What a lead scraper typed in: trimmed, empty boxes ignored, an email must
+ * look like one and a LinkedIn link must be a linkedin.com address. */
+function cleanFoundDetails(details) {
+  const values = {}
+  for (const field of Object.keys(FOUND_LABELS)) {
+    const v = String(details?.[field] ?? '').trim().slice(0, field === 'linkedinUrl' ? 300 : 200)
+    if (!v) continue
+    if (field === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return { error: `"${v}" is not an email address` }
+    if (field === 'linkedinUrl' && !/linkedin\.com\//i.test(v)) return { error: 'The LinkedIn link should be a linkedin.com address' }
+    if ((field === 'phone' || field === 'mobile') && !/\d{5,}/.test(v.replace(/\D/g, ''))) return { error: `"${v}" does not look like a phone number` }
+    values[field] = field === 'email' ? v.toLowerCase() : v
+  }
+  return { values }
+}
 /* Why a task the screen still shows is no longer open, in plain words. */
 async function closedReason(task) {
   const by = task.completedBy ? await User.findById(task.completedBy).select('name').lean() : null
@@ -335,6 +351,10 @@ router.post('/tasks/:id/complete', async (req, res) => {
   if (outcome && !outcomeMap.has(outcome) && task.channel === 'call') {
     return res.status(400).json({ error: 'Unknown call outcome' })
   }
+  // Lead scraping always says how it went: found, partly found or not found.
+  if (task.channel === 'scrape' && !findOutcome('scrape', outcome)) {
+    return res.status(400).json({ error: 'Pick what you found: Found, Found some or Not found' })
+  }
   // LinkedIn tasks may say what happened (optional): invite accepted, a reply…
   if (outcome && task.channel === 'linkedin' && !findOutcome('linkedin', outcome)) {
     return res.status(400).json({ error: 'Unknown LinkedIn outcome' })
@@ -346,6 +366,13 @@ router.post('/tasks/:id/complete', async (req, res) => {
     })
   }
 
+  // Details the lead scraper found, checked before anything is saved.
+  let found = null
+  if (task.channel === 'scrape') {
+    found = cleanFoundDetails(req.body?.details)
+    if (found.error) return res.status(400).json({ error: found.error })
+  }
+
   task.status = 'done'
   task.outcome = outcome || ''
   task.notes = notes || ''
@@ -354,7 +381,29 @@ router.post('/tasks/:id/complete', async (req, res) => {
   await task.save()
 
   const contact = await Contact.findById(task.contact)
-  if (contact) {
+  if (contact && task.channel === 'scrape') {
+    /* Lead scraping is work on the record, not contact with the person: it
+       fills in what was found and is logged on its own, never as a touch. */
+    const added = []
+    for (const [field, value] of Object.entries(found.values)) {
+      if (String(contact[field] || '') === value) continue
+      added.push(`${FOUND_LABELS[field]}: ${contact[field] ? `${contact[field]} → ` : ''}${value}`)
+      contact[field] = value
+    }
+    await contact.save()
+    const label = findOutcome('scrape', outcome)?.label || outcome
+    await logActivity({
+      contact: contact._id, type: 'lead_scraped', channel: 'scrape',
+      campaign: task.campaign, stageIndex: task.stageIndex, user: req.user._id, outcome,
+      title: `Lead scraping — ${label}${added.length ? ` · ${added.length} detail${added.length === 1 ? '' : 's'} added` : ''}`,
+      body: [added.join('\n'), notes ? `Notes: ${notes}` : ''].filter(Boolean).join('\n\n'),
+      meta: { added },
+    })
+    const enrollment = task.enrollment ? await Enrollment.findById(task.enrollment) : null
+    outcomeResult = await applyOutcome({
+      contact, channel: 'scrape', outcome, enrollment, data: {}, actorId: req.user._id, stepOwner: task.assignedTo,
+    })
+  } else if (contact) {
     await logActivity({
       contact: contact._id,
       type: task.channel === 'call' ? 'call_logged' : 'linkedin_action',

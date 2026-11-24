@@ -14,7 +14,7 @@ import { dateTime, fullName, relativeDate } from '../components/format.js'
 
 const DOT_CLASS = {
   email_sent: 'email', email_failed: 'alert', email_suppressed: 'alert',
-  linkedin_action: 'linkedin', call_logged: 'call',
+  linkedin_action: 'linkedin', call_logged: 'call', lead_scraped: 'scrape',
   unsubscribed: 'alert', dnc_added: 'alert',
 }
 

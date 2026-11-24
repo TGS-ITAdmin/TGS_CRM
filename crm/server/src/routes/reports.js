@@ -303,6 +303,13 @@ router.get('/reps', async (req, res) => {
   ])
   const meetingsBy = new Map(meetings.map((m) => [String(m._id), m.n]))
 
+  // Lead scraping done in range: counted on its own, never as a touch.
+  const scraped = await Activity.aggregate([
+    { $match: { createdAt: { $gte: from, $lte: to }, type: 'lead_scraped', ...userFilter } },
+    { $group: { _id: '$user', n: { $sum: 1 }, found: { $sum: { $cond: [{ $in: ['$outcome', ['found', 'partly_found']] }, 1, 0] } } } },
+  ])
+  const scrapedBy = new Map(scraped.map((x) => [String(x._id), x]))
+
   // Same definition of overdue as the work queue: due before today began.
   const dayStart = startOfDay(req.user.timezone || 'UTC')
   const [overdue, completed, owned] = await Promise.all([
@@ -392,6 +399,8 @@ router.get('/reps', async (req, res) => {
       meetingsBooked: booked,
       contactsOwned: ownedBy.get(key) || 0,
       ownedReached: reachedBy.get(key) || 0,
+      scraped: scrapedBy.get(key)?.n || 0,
+      scrapedFound: scrapedBy.get(key)?.found || 0,
       dealsWon: wonBy.get(key) || 0,
       dealsLost: lostBy.get(key) || 0,
       wonValueUsd: wonValueBy.get(key) || 0,

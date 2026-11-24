@@ -20,6 +20,10 @@ function withChannels(c) {
  * one person. Anything unrecognised falls back to the default. */
 function stageAssignment(s) {
   const { ROLES } = require('../lib/permissions')
+  // A Lead scraping step with no choice made goes to the Lead scraper queue.
+  if (s.channel === 'scrape' && s.assignMode === undefined) {
+    return { assignMode: 'role', assignRole: 'lead_scraper', assignUser: null }
+  }
   if (s.assignMode === 'role' && ROLES.includes(s.assignRole) && s.assignRole !== 'admin') {
     return { assignMode: 'role', assignRole: s.assignRole, assignUser: null }
   }

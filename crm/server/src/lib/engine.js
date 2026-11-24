@@ -92,6 +92,7 @@ async function stageAssignee(stage, contact, enrollment, actorId) {
 }
 
 const CHANNEL_VERB = {
+  scrape: 'Find contact details for',
   linkedin: 'Send LinkedIn message',
   call: 'Call',
   email: 'Email',
@@ -142,6 +143,7 @@ async function materializeStage({ enrollment, campaign, contact, stageIndex, act
 
   const merged = renderStage(stage, contact)
   const who = await stageAssignee(stage, contact, enrollment, actorId)
+  const isScrape = channel === 'scrape'
   const base = {
     contact: contact._id,
     enrollment: enrollment._id,
@@ -192,7 +194,8 @@ async function materializeStage({ enrollment, campaign, contact, stageIndex, act
   /* Calls and LinkedIn follow their own suppression: a do-not-call status
      stops calls only, and an email unsubscribe never stops a call. The step
      is skipped and the reason logged; the campaign carries on. */
-  const blocked = channelBlock(contact, channel)
+  // Lead scraping does not contact anyone, so no channel block applies.
+  const blocked = isScrape ? null : channelBlock(contact, channel)
   if (blocked) return skip(`${channel === 'call' ? 'Call' : 'LinkedIn'} step skipped — ${stage.name}`, blocked)
 
   const extra = {}
@@ -238,7 +241,7 @@ async function materializeStage({ enrollment, campaign, contact, stageIndex, act
       ? `Their email bounced, so this replaces the email "${merged.subject || stage.name}". Use it as talking points:\n\n${merged.body}`
       : merged.body,
   })
-  await countTouch()
+  if (!isScrape) await countTouch()
   return { kind: 'task', id: task._id, missing: merged.missing }
 }
 

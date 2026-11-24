@@ -487,6 +487,7 @@ function RepsReport({ data }) {
                 <th className="right" title="Different contacts reached">Contacts</th>
                 <th className="right">Meetings</th>
                 <th className="right" title="Meetings booked ÷ contacts touched">Conv.</th>
+                <th className="right" title="Lead scraping tasks finished · how many found details">Scraped</th>
                 <th className="right">Tasks done</th>
                 <th className="right">Overdue</th>
                 <th className="right" title="Contacts this person owns">Owns</th>
@@ -509,6 +510,10 @@ function RepsReport({ data }) {
                     {num(r.meetingsBooked)}
                   </td>
                   <td className="right">{pct(r.conversionRate)}</td>
+                  <td className="right">
+                    {num(r.scraped || 0)}
+                    {r.scraped > 0 && <span className="faint"> · {num(r.scrapedFound || 0)} found</span>}
+                  </td>
                   <td className="right">{num(r.tasksCompleted)}</td>
                   <td className="right" style={{ color: r.tasksOverdue ? 'var(--danger)' : undefined, fontWeight: r.tasksOverdue ? 650 : 400 }}>
                     {num(r.tasksOverdue)}
@@ -534,6 +539,7 @@ function RepsReport({ data }) {
                     <td className="right" title="Not added up: two people can touch the same contact" />
                     <td className="right">{num(sum((r) => r.meetingsBooked))}</td>
                     <td className="right" />
+                    <td className="right">{num(sum((r) => r.scraped))}</td>
                     <td className="right">{num(sum((r) => r.tasksCompleted))}</td>
                     <td className="right">{num(sum((r) => r.tasksOverdue))}</td>
                     <td className="right">{num(sum((r) => r.contactsOwned))}</td>

@@ -23,12 +23,14 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
   const [person, setPerson] = useState({})
   const [restartDate, setRestartDate] = useState('')
   const [confirming, setConfirming] = useState(null)
+  const isScrape = task.channel === 'scrape'
+  const [details, setDetails] = useState({})
   const outcomeList = (outcomeCatalogue?.[task.channel] || []).length
     ? outcomeCatalogue[task.channel]
     : (task.channel === 'call' ? callOutcomes.map((o) => ({ key: o.value, label: o.label })) : [])
   const outcomeDef = outcomeList.find((o) => o.key === outcome) || null
   const preview = useOutcomePreview(
-    outcome && task.kind !== 'recheck' && (task.channel === 'call' || task.channel === 'linkedin')
+    outcome && task.kind !== 'recheck' && ['call', 'linkedin', 'scrape'].includes(task.channel)
       ? { taskId: task._id, outcome, restartDate: restartDate || undefined, person }
       : null
   )
@@ -64,6 +66,7 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
     callbackDays: callbackDays ? Number(callbackDays) : undefined,
     person: outcomeDef?.needsPerson ? person : undefined,
     restartDate: outcomeDef?.needsDate && restartDate ? restartDate : undefined,
+    details: isScrape ? details : undefined,
   })
   const doComplete = () => run(() => api.completeTask(task._id, outcomeBody()), 'Logged')
   // Guardrail: confirm first when the outcome ends a campaign, sets Lost or flags DNC.
@@ -170,7 +173,7 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
             {contact.email && <a className="btn btn-sm" href={`mailto:${contact.email}`}>{contact.email}</a>}
             <Link className="btn btn-sm" to={`/contacts/${contact._id}`}>Contact record</Link>
             <div className="spacer" />
-            {task.scriptBody && <CopyButton text={task.scriptBody} label="Copy message" />}
+            {task.scriptBody && <CopyButton text={task.scriptBody} label={isScrape ? "Copy instructions" : "Copy message"} />}
           </div>
 
           {contact.doNotContact && (
@@ -191,7 +194,10 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
 
           <div className="divider" />
 
-          {!isRecheck && <div className="grid grid-2">
+          {isScrape && <ScrapeFields contact={contact} details={details} setDetails={setDetails} outcome={outcome}
+            setOutcome={setOutcome} outcomeList={outcomeList} />}
+
+          {!isRecheck && !isScrape && <div className="grid grid-2">
             {(task.channel === 'call' || (task.channel === 'linkedin' && outcomeList.length > 0)) && (
               <div className="field" style={{ margin: 0 }}>
                 <label className="label">{task.channel === 'call' ? 'How did the call go?' : 'What happened? (optional)'}</label>
@@ -248,10 +254,10 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
               </>
             ) : (
               <button
-                className="btn btn-primary" disabled={busy || (task.channel === 'call' && !outcome)}
+                className="btn btn-primary" disabled={busy || ((task.channel === 'call' || isScrape) && !outcome)}
                 onClick={complete}
               >
-                {busy ? 'Saving…' : task.channel === 'call' ? 'Log call & close' : 'Mark done'}
+                {busy ? 'Saving…' : task.channel === 'call' ? 'Log call & close' : isScrape ? 'Save & close' : 'Mark done'}
               </button>
             )}
             <button className="btn" disabled={busy}
@@ -357,5 +363,50 @@ export default function WorkItem({ task, onDone, defaultOpen = false }) {
         </Modal>
       )}
     </div>
+  )
+}
+
+/* Lead scraping: shows what the contact record has and what is missing,
+ * takes what was found (saved to the contact on Save & close), and asks how
+ * it went. Empty boxes leave the record as it is. */
+const SCRAPE_FIELDS = [
+  ['email', 'Email', 'name@company.com'],
+  ['phone', 'Phone', 'Direct or office line'],
+  ['mobile', 'Mobile', 'Mobile number'],
+  ['linkedinUrl', 'LinkedIn', 'https://www.linkedin.com/in/…'],
+  ['title', 'Job title', 'e.g. Practice Owner'],
+]
+
+function ScrapeFields({ contact, details, setDetails, outcome, setOutcome, outcomeList }) {
+  const missing = SCRAPE_FIELDS.filter(([k]) => !contact[k] && k !== 'mobile').map(([, l]) => l)
+  return (
+    <>
+      <div className={`banner ${missing.length ? 'banner-warn' : 'banner-info'}`} style={{ marginBottom: 10 }}>
+        <span>🔎</span>
+        <div className="small">
+          {missing.length
+            ? <>Missing on the record: <strong>{missing.join(', ')}</strong>. Fill in what you find below.</>
+            : 'The record has email, phone, LinkedIn and job title. Check they are right, or correct them below.'}
+        </div>
+      </div>
+      <div className="grid grid-2">
+        {SCRAPE_FIELDS.map(([k, label, ph]) => (
+          <div className="field" style={{ margin: 0 }} key={k}>
+            <label className="label">
+              {label}{contact[k] ? <span className="faint" style={{ fontWeight: 400 }}> · now: {contact[k]}</span> : <span style={{ color: 'var(--warn)' }}> · missing</span>}
+            </label>
+            <input className="input" value={details[k] || ''} placeholder={contact[k] ? 'Leave empty to keep' : ph}
+              onChange={(e) => setDetails({ ...details, [k]: e.target.value })} />
+          </div>
+        ))}
+        <div className="field" style={{ margin: 0 }}>
+          <label className="label">How did it go?</label>
+          <select className="select" value={outcome} onChange={(e) => setOutcome(e.target.value)}>
+            <option value="">Pick one…</option>
+            {outcomeList.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+          </select>
+        </div>
+      </div>
+    </>
   )
 }

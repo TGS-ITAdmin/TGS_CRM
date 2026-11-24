@@ -4,6 +4,7 @@
 
 const CHANNEL_COLOR = {
   linkedin: 'var(--linkedin)',
+  scrape: 'var(--scrape)',
   email: 'var(--email)',
   call: 'var(--call)',
 }

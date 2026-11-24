@@ -9,7 +9,9 @@ const { Schema, model } = mongoose
 /* Shared vocabularies                                                  */
 /* ------------------------------------------------------------------ */
 
-const CHANNELS = ['linkedin', 'email', 'call']
+/* 'scrape' = Lead scraping: finding a contact's missing details. It is work
+   on the contact, not contact with them, so it never counts as a touch. */
+const CHANNELS = ['linkedin', 'email', 'call', 'scrape']
 
 // Default contact lifecycle list. Editable by an admin in Settings — the values
 // are stored as free strings on the contact, so renaming a status never breaks
@@ -987,6 +989,7 @@ const ACTIVITY_TYPES = [
   'unsubscribed',
   'dnc_added',
   'step_skipped',
+  'lead_scraped',
   'recheck_logged',
   'branch_applied',
   'flow_paused',
