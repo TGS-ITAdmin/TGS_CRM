@@ -133,9 +133,14 @@ function labelFor(model, d) {
 function bindRequest(req, res) {
   if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return
   if (als.getStore()) return
+  // While an admin is viewing as someone, the log names the admin who
+  // really made the change, and who they were viewing as.
+  const who = req.impersonator || req.user
   const ctx = {
-    user: req.user._id,
-    userName: req.user.name || req.user.email || '',
+    user: who._id,
+    userName: req.impersonator
+      ? `${who.name || who.email} (as ${req.user.name || req.user.email})`
+      : (req.user.name || req.user.email || ''),
     method: req.method,
     path: String(req.originalUrl || req.url || '').split('?')[0],
     opPromise: null,

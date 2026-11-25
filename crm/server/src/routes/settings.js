@@ -29,6 +29,8 @@ router.get('/bootstrap', async (req, res) => {
   const settings = await Settings.findOne({ key: 'global' }).lean()
   const users = await User.find({ active: true }).select('name email role').lean()
   res.json({
+    // Set while an admin is viewing as this person (see "View as").
+    viewingAs: req.impersonator ? { by: { id: req.impersonator._id, name: req.impersonator.name } } : null,
     settings: {
       companyName: settings.companyName,
       physicalAddress: settings.physicalAddress,

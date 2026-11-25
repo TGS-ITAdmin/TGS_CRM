@@ -56,7 +56,7 @@ export default function Settings() {
     },
   ].filter((g) => g.items.length > 0)
 
-  const [tab, setTab] = useState('profile')
+  const [tab, setTab] = useState(() => new URLSearchParams(window.location.search).get('tab') || 'profile')
   const current = groups.flatMap((g) => g.items).find((i) => i.key === tab)
 
   return (
@@ -950,9 +950,10 @@ function AddSuppression({ onClose, onAdded }) {
 
 function Users() {
   const toast = useToast()
-  const { reloadBootstrap, user: me } = useAuth()
+  const { reloadBootstrap, user: me, viewAs, viewingAs } = useAuth()
   const [data, setData] = useState(null)
   const [adding, setAdding] = useState(false)
+  const [startingView, setStartingView] = useState('')
   const [editing, setEditing] = useState(null)
   const [removing, setRemoving] = useState(null)
 
@@ -1023,6 +1024,16 @@ function Users() {
                   <td className="small faint">{u.timezone}</td>
                   <td className="small faint nowrap">{u.lastLoginAt ? dateTime(u.lastLoginAt) : 'never'}</td>
                   <td className="right nowrap">
+                    {me.role === 'admin' && !viewingAs && u.active && u.id !== me.id && (
+                      <button className="btn btn-sm" disabled={!!startingView}
+                        title={`See the CRM exactly as ${u.name} does: their My Day, contacts, reports…`}
+                        onClick={async () => {
+                          setStartingView(u.id)
+                          try { await viewAs(u.id) } catch (err) { toast.error(err.message); setStartingView('') }
+                        }}>
+                        {startingView === u.id ? 'Opening…' : 'View as'}
+                      </button>
+                    )}
                     <button className="btn btn-sm" onClick={() => setEditing(u)}>Edit access</button>
                     {u.id !== me.id && (
                       <button className="btn btn-ghost btn-sm" title={`Add a new user with the same access as ${u.name}`}

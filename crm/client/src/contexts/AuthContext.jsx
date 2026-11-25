@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
-import { api, setToken, clearToken, getToken } from '../api'
+import { api, setToken, clearToken, getToken, startViewingAs, stopViewingAs } from '../api'
 
 const AuthContext = createContext(null)
 export const useAuth = () => useContext(AuthContext)
@@ -50,9 +50,22 @@ export function AuthProvider({ children }) {
   }
 
   const logout = () => {
+    stopViewingAs()
     clearToken()
     setUser(null)
     setBoot(null)
+  }
+
+  /* View as (admins): switch this browser to the chosen person's session,
+     then reload so every screen starts fresh as them. */
+  const viewAs = async (id) => {
+    const { token } = await api.viewAs(id)
+    startViewingAs(token)
+    window.location.assign('/')
+  }
+  const stopViewing = () => {
+    stopViewingAs()
+    window.location.assign('/settings?tab=users')
   }
 
   const refreshUser = async () => {
@@ -78,6 +91,7 @@ export function AuthProvider({ children }) {
     <AuthContext.Provider
       value={{
         user, boot, loading, isAdmin, can, rights, login, logout, refreshUser,
+        viewAs, stopViewing, viewingAs: boot?.viewingAs || null,
         reloadBootstrap: loadBootstrap,
         statuses, statusMap,
         dealStages, stageMap, currencies, reportingCurrency,

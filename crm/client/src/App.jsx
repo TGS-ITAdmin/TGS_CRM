@@ -129,6 +129,7 @@ export default function App() {
     <div className="shell">
       <Sidebar counts={counts} />
       <div className="main">
+        <ViewingAsBar />
         <ErrorBoundary resetKey={location.pathname}>
         <Routes>
           <Route path="/login" element={<Navigate to="/" replace />} />
@@ -158,6 +159,22 @@ export default function App() {
         </Routes>
         </ErrorBoundary>
       </div>
+    </div>
+  )
+}
+
+/* Shown on every screen while an admin is viewing the CRM as someone else. */
+function ViewingAsBar() {
+  const { user, viewingAs, stopViewing } = useAuth()
+  if (!viewingAs) return null
+  return (
+    <div className="viewing-as-bar">
+      <span>👁</span>
+      <div style={{ flex: 1 }}>
+        <strong>Viewing as {user.name}</strong> ({ROLE_LABELS[user.role] || user.role}). You see exactly what they see.
+        Anything you change is done as {user.name} and recorded in the Activity log as {viewingAs.by.name}.
+      </div>
+      <button className="btn btn-sm" onClick={stopViewing}>Stop viewing</button>
     </div>
   )
 }

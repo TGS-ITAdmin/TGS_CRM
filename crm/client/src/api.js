@@ -4,6 +4,21 @@ export const getToken = () => localStorage.getItem(TOKEN_KEY)
 export const setToken = (t) => localStorage.setItem(TOKEN_KEY, t)
 export const clearToken = () => localStorage.removeItem(TOKEN_KEY)
 
+/* "View as": the admin's own session is kept here while they view the CRM as
+ * someone else, and put back when they stop (or if the borrowed session ends). */
+const ADMIN_TOKEN_KEY = 'crm_token_admin'
+export const isViewingAs = () => { try { return !!localStorage.getItem(ADMIN_TOKEN_KEY) } catch { return false } }
+export function startViewingAs(token) {
+  localStorage.setItem(ADMIN_TOKEN_KEY, getToken())
+  setToken(token)
+}
+export function stopViewingAs() {
+  const own = localStorage.getItem(ADMIN_TOKEN_KEY)
+  localStorage.removeItem(ADMIN_TOKEN_KEY)
+  if (own) setToken(own)
+  else clearToken()
+}
+
 class ApiError extends Error {
   constructor(message, status, payload) {
     super(message)
@@ -26,6 +41,12 @@ async function request(method, path, body, opts = {}) {
   const res = await fetch(path, { method, headers, body: payload })
 
   if (res.status === 401 && !opts.allowUnauthorized) {
+    // A "view as" session that ended: go back to the admin's own session.
+    if (isViewingAs()) {
+      stopViewingAs()
+      location.href = '/'
+      throw new ApiError('The "view as" session ended', 401)
+    }
     clearToken()
     if (!location.pathname.startsWith('/login')) location.href = '/login'
     throw new ApiError('Session expired', 401)
@@ -57,6 +78,7 @@ export const api = {
   // auth
   login: (email, password) =>
     request('POST', '/api/auth/login', { email, password }, { allowUnauthorized: true }),
+  viewAs: (id) => request('POST', `/api/auth/view-as/${id}`),
   me: () => request('GET', '/api/auth/me'),
   updateMe: (body) => request('PUT', '/api/auth/me', body),
   changePassword: (body) => request('POST', '/api/auth/change-password', body),

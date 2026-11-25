@@ -15,6 +15,13 @@ function signToken(user) {
   return jwt.sign({ id: user._id.toString() }, SECRET(), { expiresIn: '30d' })
 }
 
+/* "View as": a short session that acts as `user`, started by an admin. The
+ * admin is re-checked on every request, so it ends the moment they lose
+ * admin rights or are deactivated. */
+function signViewAsToken(user, admin) {
+  return jwt.sign({ id: user._id.toString(), imp: admin._id.toString() }, SECRET(), { expiresIn: '8h' })
+}
+
 /* The user is loaded fresh on every request rather than trusted from the
  * token. It costs one indexed lookup and means a rights change takes effect
  * immediately — nobody keeps a permission because they have not logged out. */
@@ -26,6 +33,13 @@ async function requireAuth(req, res, next) {
     const payload = jwt.verify(token, SECRET())
     const user = await User.findById(payload.id)
     if (!user || !user.active) return res.status(401).json({ error: 'Account inactive' })
+    if (payload.imp) {
+      const admin = await User.findById(payload.imp)
+      if (!admin || !admin.active || admin.role !== 'admin') {
+        return res.status(401).json({ error: 'The "view as" session has ended. Sign in again.' })
+      }
+      req.impersonator = admin
+    }
     req.user = user
     req.can = (key) => can(user, key)
     // Admin activity log: changes made during this request are recorded.
@@ -93,6 +107,6 @@ async function contactAccessScope(req) {
 }
 
 module.exports = {
-  signToken, requireAuth, requirePermission, requireAdmin,
+  signToken, signViewAsToken, requireAuth, requirePermission, requireAdmin,
   ownerScope, assignedScope, claimableScope, contactAccessScope, can,
 }
