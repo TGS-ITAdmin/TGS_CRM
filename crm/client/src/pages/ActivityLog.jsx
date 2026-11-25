@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import { useToast } from '../components/Toast.jsx'
@@ -49,7 +50,15 @@ function fmt(v) {
 export default function ActivityLog() {
   const { isAdmin, users } = useAuth()
   const toast = useToast()
-  const [query, setQueryState] = useState({ page: 1, q: '', user: '', model: '', days: '30' })
+  // Links from Reports can open the log already filtered (?user=&model=&q=&days=).
+  const [params] = useSearchParams()
+  const [query, setQueryState] = useState(() => ({
+    page: 1,
+    q: params.get('q') || '',
+    user: params.get('user') || '',
+    model: params.get('model') || '',
+    days: params.has('days') ? params.get('days') : '30',
+  }))
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [open, setOpen] = useState(null)

@@ -352,6 +352,129 @@ async function tasksWorked(req, from, to) {
   return { rows: out, totals: perRep, timezone: tz }
 }
 
+/* ---- Other work per person: everything else in the activity log ----
+ * Counted by records (an import of 30 contacts = 30), grouped so it reads
+ * at a glance. Task actions are left out (they have their own columns).
+ * With a campaign picked, only work on that campaign's contacts and
+ * enrolments counts; work that is not about contacts ("Other") is shown
+ * only without a campaign filter. */
+const WORK_GROUPS = ['contactsCreated', 'imported', 'contactsEdited', 'statusChanged', 'reassigned', 'addedToCampaign', 'movedRemoved', 'notes', 'dealsQuotes', 'other']
+const STATUS_FIELDS = new Set(['status', 'emailStatus', 'dncStatus', 'doNotContact', 'lostReason', 'nurture'])
+const BOOKKEEPING = new Set(['lastActivityAt', 'updatedAt', 'lastContactedAt'])
+
+async function otherWork(req, from, to) {
+  const { AuditOp, AuditChange } = require('../lib/audit')
+  const filter = { at: { $gte: from, $lte: to }, kind: 'change', changeCount: { $gt: 0 } }
+  if (req.query.user) filter.user = oid(req.query.user)
+  const ops = await AuditOp.find(filter).select('user userName method path').limit(50000).lean()
+  const opInfo = new Map()
+  for (const op of ops) {
+    if (TASK_ACTION_PATH.test(op.path)) continue // already in the Tasks columns
+    opInfo.set(String(op._id), op)
+  }
+  const opIds = [...opInfo.keys()]
+  const changes = []
+  for (let i = 0; i < opIds.length; i += 2000) {
+    changes.push(...await AuditChange.find({ op: { $in: opIds.slice(i, i + 2000) } })
+      .select('op model action entityId fields after.campaign').lean())
+  }
+
+  // Campaign filter: that campaign's contacts and enrolments only.
+  const campaign = /^[0-9a-f]{24}$/i.test(String(req.query.campaign || '')) ? String(req.query.campaign) : null
+  let campContacts = null
+  let enrolCampaign = null
+  if (campaign) {
+    campContacts = new Set((await Enrollment.distinct('contact', { campaign })).map(String))
+    const enrolIds = changes.filter((c) => c.model === 'Enrollment').map((c) => c.entityId)
+    enrolCampaign = new Map((await Enrollment.find({ _id: { $in: enrolIds } }).select('campaign contact').lean())
+      .map((e) => [String(e._id), String(e.campaign)]))
+  }
+
+  // Each record counts once per person per group (an import that creates
+  // and then updates a contact is still one imported contact).
+  const per = new Map()
+  const seen = new Set()
+  let current = null
+  const bump = (user, group) => {
+    const k = String(user)
+    const id = `${k}|${group}|${current}`
+    if (seen.has(id)) return
+    seen.add(id)
+    if (!per.has(k)) per.set(k, Object.fromEntries(WORK_GROUPS.map((g) => [g, 0])))
+    per.get(k)[group] += 1
+  }
+  const noteOps = new Set()
+  for (const c of changes) {
+    const op = opInfo.get(String(c.op))
+    if (!op) continue
+    const path = op.path || ''
+    current = `${c.model}:${c.entityId}`
+    const isImport = /^\/api\/contacts\/import$/.test(path)
+    if (c.model === 'Activity') {
+      // A note or logged reply is one timeline entry on one contact.
+      if (/^\/api\/contacts\/([0-9a-f]{24})\/(notes|activities)$/.test(path) && !noteOps.has(String(c.op))) {
+        const contactId = path.split('/')[3]
+        if (campContacts && !campContacts.has(contactId)) continue
+        noteOps.add(String(c.op))
+        current = `note:${c.op}`
+        bump(op.user, 'notes')
+      }
+      continue
+    }
+    if (c.model === 'Contact') {
+      if (campContacts && !campContacts.has(String(c.entityId))) continue
+      if (isImport) { if (c.action !== 'delete') bump(op.user, 'imported'); continue }
+      if (c.action === 'create') { bump(op.user, 'contactsCreated'); continue }
+      if (c.action === 'delete') { if (!campContacts) bump(op.user, 'other'); continue }
+      const fields = (c.fields || []).filter((f) => !BOOKKEEPING.has(f))
+      if (!fields.length) continue
+      if (fields.includes('owner')) bump(op.user, 'reassigned')
+      else if (fields.some((f) => STATUS_FIELDS.has(f))) bump(op.user, 'statusChanged')
+      else bump(op.user, 'contactsEdited')
+      continue
+    }
+    if (c.model === 'Enrollment') {
+      const camp = c.after?.campaign ? String(c.after.campaign) : enrolCampaign?.get(String(c.entityId))
+      if (campaign && camp !== campaign) continue
+      const moving = /^\/api\/campaigns\/move$|^\/api\/campaigns\/enrollments\/[0-9a-f]{24}\/exit$/.test(path)
+      if (moving) {
+        // Out of one campaign (the exit) and, for a move, into another: with a
+        // campaign picked, either side counts for that campaign.
+        if (c.action === 'update' && (c.fields || []).includes('status')) bump(op.user, 'movedRemoved')
+        else if (campaign && c.action === 'create') bump(op.user, 'movedRemoved')
+        continue
+      }
+      if (c.action === 'create') bump(op.user, 'addedToCampaign')
+      continue
+    }
+    if (c.model === 'Deal' || c.model === 'Quote') {
+      if (!campContacts) bump(op.user, 'dealsQuotes')
+      continue
+    }
+    /* Everything else: companies, campaigns, emails, settings, users…
+       Side effects are left out: tasks and drafts the CRM made, companies
+       created along with a contact, deal or import, the timeline. */
+    if (campContacts) continue
+    if (c.model === 'Task' || c.model === 'Activity') continue
+    if (c.model === 'OutboxMessage' && !/^\/api\/work\/outbox/.test(path)) continue
+    if (c.model === 'Company' && !/^\/api\/companies/.test(path)) continue
+    bump(op.user, 'other')
+  }
+  return per
+}
+
+router.get('/other-work', async (req, res) => {
+  if (!req.can('reports.viewTeam')) req.query.user = req.user._id.toString()
+  const { from, to } = range(req)
+  const per = await otherWork(req, from, to)
+  const names = new Map((await User.find({ _id: { $in: [...per.keys()] } }).select('name role').lean()).map((u) => [String(u._id), u]))
+  const rows = [...per.entries()]
+    .map(([user, g]) => ({ user, name: names.get(user)?.name || 'Unknown', role: names.get(user)?.role || '', ...g, total: WORK_GROUPS.reduce((t, k) => t + g[k], 0) }))
+    .filter((r) => r.total > 0)
+    .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name))
+  res.json({ rows, groups: WORK_GROUPS, campaignFiltered: !!req.query.campaign })
+})
+
 router.get('/reps', async (req, res) => {
   if (!req.can('reports.viewTeam')) {
     // Without team visibility you still get your own row — a rep should be

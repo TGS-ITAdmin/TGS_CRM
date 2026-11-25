@@ -127,8 +127,11 @@ export default function Reports() {
           : tab === 'channels'
           ? api.reportChannels({ ...range, campaign: campaign || undefined })
           : tab === 'reps'
-          ? Promise.all([api.reportReps({ ...range, campaign: campaign || undefined }), api.reportTasksWorked({ ...range, campaign: campaign || undefined })])
-            .then(([reps, worked]) => ({ ...reps, worked }))
+          ? Promise.all([
+            api.reportReps({ ...range, campaign: campaign || undefined }),
+            api.reportTasksWorked({ ...range, campaign: campaign || undefined }),
+            api.reportOtherWork({ ...range, campaign: campaign || undefined }),
+          ]).then(([reps, worked, other]) => ({ ...reps, worked, other, from: range.from }))
           : api.reportScoreboard({ ...range, campaign: campaign || undefined, unit: spanDays(days, custom) <= 14 ? 'day' : 'week' }),
       ])
       if (req !== latest.current) return // a newer tab/filter was picked meanwhile
@@ -592,7 +595,83 @@ function RepsReport({ data }) {
           />
         </div>
       </div>
+      <OtherWork data={data.other} from={data.from} />
       <TasksWorked data={data.worked} />
+    </div>
+  )
+}
+
+/* Everything else each person did, from the activity log, counted by
+ * records (an import of 30 contacts = 30). Each number opens the activity
+ * log filtered to that person and kind of record. */
+const OTHER_WORK = [
+  ['contactsCreated', 'Contacts created', 'Added one by one (not imported)', 'Contact'],
+  ['imported', 'Imported', 'Contacts created or updated by an import', 'Contact'],
+  ['contactsEdited', 'Edited', 'Contact details changed (name, title, tags, company…)', 'Contact'],
+  ['statusChanged', 'Status changed', 'Status, email status, DNC or lost reason changed', 'Contact'],
+  ['reassigned', 'Reassigned', 'Contacts given a new owner', 'Contact'],
+  ['addedToCampaign', 'Added to campaign', 'Contacts put into a campaign (incl. at import)', 'Enrollment'],
+  ['movedRemoved', 'Moved / removed', 'Contacts moved to another campaign or taken out of one', 'Enrollment'],
+  ['notes', 'Notes & replies', 'Notes and replies logged on contacts', ''],
+  ['dealsQuotes', 'Deals & quotes', 'Deals and quotes created or changed', 'Deal'],
+  ['other', 'Other', 'Companies, campaigns, emails, settings and everything else', ''],
+]
+
+function OtherWork({ data, from }) {
+  if (!data) return null
+  const rows = data.rows || []
+  const sinceDays = Math.ceil((Date.now() - new Date(from).getTime()) / 86400000)
+  const days = [1, 7, 30, 90].find((d) => d >= sinceDays) || ''
+  const logLink = (user, model, q) => `/activity-log?${new URLSearchParams({ user, model, q: q || '', days: String(days) })}`
+  const sum = (k) => rows.reduce((t, r) => t + r[k], 0)
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Other work</h2>
+        <span className="small faint">
+          From the Activity log · counted by records (an import of 30 = 30) · click a number to see the entries
+          {data.campaignFiltered && ' · campaign filter: only work on that campaign\u2019s contacts (Deals and Other not split by campaign)'}
+        </span>
+      </div>
+      {rows.length === 0 ? (
+        <div className="card-body small faint">Nothing else was done in this period.</div>
+      ) : (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th style={{ minWidth: 180 }}>Rep</th>
+                {OTHER_WORK.map(([k, label, tip]) => <th key={k} className="right" title={tip}>{label}</th>)}
+                <th className="right th-start">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.user}>
+                  <td className="strong">{r.name}</td>
+                  {OTHER_WORK.map(([k, , , model]) => (
+                    <td key={k} className="right">
+                      {r[k] && !(data.campaignFiltered && (k === 'dealsQuotes' || k === 'other'))
+                        ? <Link to={logLink(r.user, model, k === 'notes' ? 'note' : k === 'imported' ? 'Imported' : '')}>{num(r[k])}</Link>
+                        : data.campaignFiltered && (k === 'dealsQuotes' || k === 'other') ? <span className="faint">—</span> : <span className="faint">0</span>}
+                    </td>
+                  ))}
+                  <td className="right strong td-start">{num(r.total)}</td>
+                </tr>
+              ))}
+            </tbody>
+            {rows.length > 1 && (
+              <tfoot>
+                <tr>
+                  <td>Team total</td>
+                  {OTHER_WORK.map(([k]) => <td key={k} className="right">{num(sum(k))}</td>)}
+                  <td className="right td-start">{num(sum('total'))}</td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+      )}
     </div>
   )
 }
