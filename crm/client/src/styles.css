@@ -417,6 +417,9 @@ table.data tfoot td { font-weight: 650; background: var(--surface-2); border-bot
   width: 100%; max-width: 560px; max-height: 90vh; display: flex; flex-direction: column;
 }
 .modal.wide { max-width: 900px; }
+/* A button that looks like a link (e.g. clickable numbers in reports). */
+.link-button { background: none; border: none; padding: 0; font: inherit; cursor: pointer; color: var(--accent); }
+.link-button:hover { opacity: 0.8; }
 .modal.xwide { max-width: 1150px; }
 .modal-head {
   padding: 15px 18px; border-bottom: 1px solid var(--border);

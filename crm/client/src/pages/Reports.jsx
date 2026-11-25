@@ -3,9 +3,9 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import { useToast } from '../components/Toast.jsx'
-import { Channel, Empty, Loading } from '../components/ui.jsx'
+import { Channel, Empty, Loading, Modal } from '../components/ui.jsx'
 import { CHANNEL_COLOR, Donut, FunnelChart, GroupedBars, LineChart, ValueBars } from '../components/charts.jsx'
-import { num, pct, shortDate, money, monthLabel } from '../components/format.js'
+import { num, pct, shortDate, money, monthLabel, fullName, companyName, dueLabel } from '../components/format.js'
 
 const TABS = [
   { key: 'pipeline', label: 'Pipeline' },
@@ -130,7 +130,7 @@ export default function Reports() {
           ? Promise.all([
             api.reportReps({ ...range, campaign: campaign || undefined }),
             api.reportOtherWork({ ...range, campaign: campaign || undefined }),
-          ]).then(([reps, other]) => ({ ...reps, other, from: range.from }))
+          ]).then(([reps, other]) => ({ ...reps, other, from: range.from, campaign: campaign || '' }))
           : api.reportScoreboard({ ...range, campaign: campaign || undefined, unit: spanDays(days, custom) <= 14 ? 'day' : 'week' }),
       ])
       if (req !== latest.current) return // a newer tab/filter was picked meanwhile
@@ -460,6 +460,7 @@ function ChannelsReport({ data }) {
 /* -------------------------------------------------------------- */
 
 function RepsReport({ data }) {
+  const [overdueFor, setOverdueFor] = useState(null)
   if (!data) return null
   if (!data.rows.length) return <div className="card"><Empty icon="👥" title="No users to report on" /></div>
 
@@ -535,7 +536,13 @@ function RepsReport({ data }) {
                     {r.scraped > 0 && <span className="faint"> · {num(r.scrapedFound || 0)} found</span>}
                   </td>
                   <td className="right" style={{ color: r.tasksOverdue ? 'var(--danger)' : undefined, fontWeight: r.tasksOverdue ? 650 : 400 }}>
-                    {num(r.tasksOverdue)}
+                    {r.tasksOverdue ? (
+                      <button className="link-button" title={`See ${r.user.name}'s overdue tasks`}
+                        style={{ color: 'inherit', fontWeight: 'inherit', textDecoration: 'underline' }}
+                        onClick={() => setOverdueFor(r.user)}>
+                        {num(r.tasksOverdue)}
+                      </button>
+                    ) : num(r.tasksOverdue)}
                   </td>
                   <td className="right faint td-start">{num(r.contactsOwned)}</td>
                   <td className="right">
@@ -596,7 +603,67 @@ function RepsReport({ data }) {
           />
         </div>
       </div>
+      {overdueFor && <OverdueList user={overdueFor} campaign={data.campaign} onClose={() => setOverdueFor(null)} />}
     </div>
+  )
+}
+
+/* One person's overdue tasks, oldest first: who, what step, how late.
+ * Each row links to the contact so it can be worked or reassigned. */
+function OverdueList({ user, campaign, onClose }) {
+  const { user: me } = useAuth()
+  const [data, setData] = useState(null)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    api.overdueTasks({ user: user.id, campaign: campaign || undefined })
+      .then(setData).catch((err) => setError(err.message))
+  }, [user.id, campaign])
+  const daysLate = (d) => Math.max(1, Math.floor((Date.now() - new Date(d).getTime()) / 86400000))
+  return (
+    <Modal title={`${user.name}: overdue tasks${data ? ` (${num(data.total)})` : ''}`} onClose={onClose} width="wide"
+      footer={<button className="btn" onClick={onClose}>Close</button>}>
+      {error ? <div className="banner banner-danger">{error}</div> : !data ? <Loading /> : data.items.length === 0 ? (
+        <Empty icon="✓" title="Nothing overdue">These may have been done since the report loaded.</Empty>
+      ) : (
+        <>
+          <p className="small faint" style={{ marginTop: 0 }}>
+            Oldest first{campaign ? ' · this campaign only' : ''} · open and due before today.
+            Click a name to open the contact.
+          </p>
+          <div className="table-wrap" style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+            <table className="data">
+              <thead>
+                <tr><th style={{ width: 70 }} /><th>Contact</th><th>Task</th><th>Campaign</th><th>Was due</th><th className="right">Late</th></tr>
+              </thead>
+              <tbody>
+                {data.items.map((t) => (
+                  <tr key={t._id}>
+                    <td><Channel value={t.channel} showLabel={false} /></td>
+                    <td>
+                      {t.contact ? <Link to={`/contacts/${t.contact._id}`} onClick={onClose} className="strong">{fullName(t.contact)}</Link> : '—'}
+                      {t.contact && companyName(t.contact) && <div className="small faint">{companyName(t.contact)}</div>}
+                    </td>
+                    <td>
+                      {t.escalated && <span className="tag" style={{ marginRight: 6, background: 'var(--danger)', color: '#fff' }}>Escalated</span>}
+                      {t.stageName || t.title}
+                    </td>
+                    <td className="small">
+                      {t.campaign?.name || '—'}
+                      {t.campaign && t.campaign.active === false && <span className="faint"> (paused)</span>}
+                    </td>
+                    <td className="small nowrap">{dueLabel(t.dueAt, me.timezone).replace(/^overdue — /, '')}</td>
+                    <td className="right nowrap" style={{ color: 'var(--danger)', fontWeight: 600 }}>{daysLate(t.dueAt)}d</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {data.total > data.items.length && (
+            <div className="small faint" style={{ marginTop: 8 }}>Showing the oldest {data.items.length} of {num(data.total)}.</div>
+          )}
+        </>
+      )}
+    </Modal>
   )
 }
 

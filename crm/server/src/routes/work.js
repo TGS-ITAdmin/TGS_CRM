@@ -261,6 +261,29 @@ router.get('/tasks', async (req, res) => {
   res.json({ items, total, page, pages: Math.ceil(total / limit) })
 })
 
+/* ---- One person's overdue tasks (Reports > Reps > Overdue) ----
+ * Same definition as the number on the report: open, due before today
+ * began (viewer's timezone), optionally one campaign. Anyone who can see
+ * the team report can open anyone's list; others only their own. */
+router.get('/overdue', async (req, res) => {
+  const user = String(req.query.user || req.user._id)
+  if (!/^[0-9a-f]{24}$/i.test(user)) return res.status(400).json({ error: 'Unknown person' })
+  if (user !== String(req.user._id) && !req.can('reports.viewTeam')) {
+    return res.status(403).json({ error: 'You can only see your own overdue tasks' })
+  }
+  const filter = { assignedTo: user, status: 'pending', dueAt: { $lt: startOfDay(req.user.timezone || 'UTC') } }
+  if (/^[0-9a-f]{24}$/i.test(String(req.query.campaign || ''))) filter.campaign = req.query.campaign
+  const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 200))
+  const [items, total] = await Promise.all([
+    Task.find(filter).sort({ dueAt: 1 }).limit(limit).populate(CONTACT_POPULATE).populate('campaign', 'name active').lean(),
+    Task.countDocuments(filter),
+  ])
+  const R = await rules.getRules()
+  const cutoff = rules.escalationCutoff(new Date(), R)
+  for (const t of items) t.escalated = new Date(t.dueAt) < cutoff
+  res.json({ items, total })
+})
+
 /* ---- Call list: timezone-aware, sorted by who is reachable now ---- */
 router.get('/call-list', async (req, res) => {
   const filter = { ...assignedScope(req), status: 'pending', channel: 'call', ...(await notPaused()) }
