@@ -228,6 +228,7 @@ export const api = {
   reportFunnel: (params) => request('GET', `/api/reports/funnel${qs(params)}`),
   reportChannels: (params) => request('GET', `/api/reports/channels${qs(params)}`),
   reportReps: (params) => request('GET', `/api/reports/reps${qs(params)}`),
+  reportTasksWorked: (params) => request('GET', `/api/reports/tasks-worked${qs(params)}`),
   reportScoreboard: (params) => request('GET', `/api/reports/scoreboard${qs(params)}`),
   reportPipeline: (params) => request('GET', `/api/reports/pipeline${qs(params)}`),
   reportForecast: (params) => request('GET', `/api/reports/forecast${qs(params)}`),

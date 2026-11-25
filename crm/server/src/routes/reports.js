@@ -266,6 +266,92 @@ router.get('/channels', async (req, res) => {
 /* ==================================================================== */
 /* 3. Rep activity and performance                                       */
 /* ==================================================================== */
+/* ---- Tasks worked per person per day ----
+ * Every task action is already in the activity log (who, when, which task),
+ * so this reads it there: done/logged, skipped, snoozed, and claimed or put
+ * back in a shared queue. Each task counts once per person per day in each
+ * column, and once in "Tasks worked" however many things were done to it.
+ * Days follow the viewer's own timezone. History starts when the activity
+ * log was switched on. */
+const TASK_ACTION = [
+  [/^\/api\/work\/tasks\/([0-9a-f]{24})\/complete$/, 'done'],
+  [/^\/api\/work\/tasks\/([0-9a-f]{24})\/(skip|skip-step)$/, 'skipped'],
+  [/^\/api\/work\/tasks\/([0-9a-f]{24})\/snooze$/, 'snoozed'],
+  [/^\/api\/work\/tasks\/([0-9a-f]{24})\/(claim|release)$/, 'claimed'],
+  [/^\/api\/campaigns\/enrollments\/([0-9a-f]{24})\/skip-step$/, 'skipped', 'enrollment'],
+]
+const TASK_ACTION_PATH = /^\/api\/(work\/tasks\/[0-9a-f]{24}\/(complete|skip|skip-step|snooze|claim|release)|campaigns\/enrollments\/[0-9a-f]{24}\/skip-step)$/
+
+router.get('/tasks-worked', async (req, res) => {
+  if (!req.can('reports.viewTeam')) req.query.user = req.user._id.toString()
+  const { from, to } = range(req)
+  res.json(await tasksWorked(req, from, to))
+})
+
+async function tasksWorked(req, from, to) {
+  const { AuditOp } = require('../lib/audit')
+  const tz = req.user.timezone || 'UTC'
+  const filter = { at: { $gte: from, $lte: to }, kind: 'change', method: 'POST', changeCount: { $gt: 0 }, path: TASK_ACTION_PATH }
+  if (req.query.user) filter.user = oid(req.query.user)
+  const ops = await AuditOp.find(filter).select('user userName path at').sort({ at: 1 }).limit(100000).lean()
+
+  // Optional campaign filter: keep actions on that campaign's tasks only.
+  let inCampaign = null
+  if (req.query.campaign && /^[0-9a-f]{24}$/i.test(String(req.query.campaign))) {
+    const taskIds = []
+    const enrollmentIds = []
+    for (const op of ops) {
+      for (const [rx, , kind] of TASK_ACTION) {
+        const m = op.path.match(rx)
+        if (m) { (kind === 'enrollment' ? enrollmentIds : taskIds).push(m[1]); break }
+      }
+    }
+    const [t, e] = await Promise.all([
+      Task.find({ _id: { $in: taskIds }, campaign: req.query.campaign }).distinct('_id'),
+      Enrollment.find({ _id: { $in: enrollmentIds }, campaign: req.query.campaign }).distinct('_id'),
+    ])
+    inCampaign = new Set([...t, ...e].map(String))
+  }
+
+  const dayOf = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })
+  const rows = new Map()
+  const totals = new Map() // whole period: each task once per person per column
+  for (const op of ops) {
+    let hit = null
+    for (const [rx, column] of TASK_ACTION) {
+      const m = op.path.match(rx)
+      if (m) { hit = { id: m[1], column }; break }
+    }
+    if (!hit || (inCampaign && !inCampaign.has(hit.id))) continue
+    const day = dayOf.format(op.at)
+    const key = `${day}|${op.user}`
+    if (!rows.has(key)) {
+      rows.set(key, { day, user: String(op.user), name: op.userName || '', worked: new Set(), done: new Set(), skipped: new Set(), snoozed: new Set(), claimed: new Set() })
+    }
+    const r = rows.get(key)
+    r.worked.add(hit.id)
+    r[hit.column].add(hit.id)
+    const tk = String(op.user)
+    if (!totals.has(tk)) totals.set(tk, { user: tk, name: op.userName || '', worked: new Set(), done: new Set(), skipped: new Set(), snoozed: new Set(), claimed: new Set(), days: new Set() })
+    const tot = totals.get(tk)
+    tot.worked.add(hit.id)
+    tot[hit.column].add(hit.id)
+    tot.days.add(day)
+  }
+  const names = new Map((await User.find({ _id: { $in: [...totals.keys()] } }).select('name').lean()).map((u) => [String(u._id), u.name]))
+  const sizes = (r) => ({ worked: r.worked.size, done: r.done.size, skipped: r.skipped.size, snoozed: r.snoozed.size, claimed: r.claimed.size })
+  const out = [...rows.values()]
+    .map((r) => ({
+      day: r.day, user: r.user, name: names.get(r.user) || r.name || 'Unknown',
+      worked: r.worked.size, done: r.done.size, skipped: r.skipped.size, snoozed: r.snoozed.size, claimed: r.claimed.size,
+    }))
+    .sort((a, b) => (a.day === b.day ? a.name.localeCompare(b.name) : a.day < b.day ? 1 : -1))
+  const perRep = [...totals.values()]
+    .map((r) => ({ user: r.user, name: names.get(r.user) || r.name || 'Unknown', ...sizes(r), activeDays: r.days.size }))
+    .sort((a, b) => b.worked - a.worked || a.name.localeCompare(b.name))
+  return { rows: out, totals: perRep, timezone: tz }
+}
+
 router.get('/reps', async (req, res) => {
   if (!req.can('reports.viewTeam')) {
     // Without team visibility you still get your own row — a rep should be
@@ -274,13 +360,16 @@ router.get('/reps', async (req, res) => {
   }
   const { from, to } = range(req)
   const userFilter = req.query.user ? { user: oid(req.query.user) } : {}
+  // Campaign filter: activity and tasks from that campaign only. Owns and
+  // Owned reached are about each person's whole book, so they are not filtered.
+  const campFilter = /^[0-9a-f]{24}$/i.test(String(req.query.campaign || '')) ? { campaign: oid(req.query.campaign) } : {}
 
   const users = await User.find(
     req.query.user ? { _id: req.query.user } : { active: true }
   ).select('name email role timezone').lean()
 
   const activity = await Activity.aggregate([
-    { $match: { createdAt: { $gte: from, $lte: to }, type: { $in: TOUCH_TYPES }, ...userFilter } },
+    { $match: { createdAt: { $gte: from, $lte: to }, type: { $in: TOUCH_TYPES }, ...userFilter, ...campFilter } },
     {
       $group: {
         _id: { user: '$user', channel: '$channel' },
@@ -295,6 +384,7 @@ router.get('/reps', async (req, res) => {
       $match: {
         createdAt: { $gte: from, $lte: to },
         ...userFilter,
+        ...campFilter,
         $or: [{ 'meta.to': { $in: await meetingStatuses() } }, { outcome: 'meeting_booked' }],
       },
     },
@@ -305,7 +395,7 @@ router.get('/reps', async (req, res) => {
 
   // Lead scraping done in range: counted on its own, never as a touch.
   const scraped = await Activity.aggregate([
-    { $match: { createdAt: { $gte: from, $lte: to }, type: 'lead_scraped', ...userFilter } },
+    { $match: { createdAt: { $gte: from, $lte: to }, type: 'lead_scraped', ...userFilter, ...campFilter } },
     { $group: { _id: '$user', n: { $sum: 1 }, found: { $sum: { $cond: [{ $in: ['$outcome', ['found', 'partly_found']] }, 1, 0] } } } },
   ])
   const scrapedBy = new Map(scraped.map((x) => [String(x._id), x]))
@@ -314,11 +404,11 @@ router.get('/reps', async (req, res) => {
   const dayStart = startOfDay(req.user.timezone || 'UTC')
   const [overdue, completed, owned] = await Promise.all([
     Task.aggregate([
-      { $match: { status: 'pending', dueAt: { $lt: dayStart } } },
+      { $match: { status: 'pending', dueAt: { $lt: dayStart }, ...campFilter } },
       { $group: { _id: '$assignedTo', n: { $sum: 1 } } },
     ]),
     Task.aggregate([
-      { $match: { status: 'done', completedAt: { $gte: from, $lte: to } } },
+      { $match: { status: 'done', completedAt: { $gte: from, $lte: to }, ...campFilter } },
       { $group: { _id: '$completedBy', n: { $sum: 1 } } },
     ]),
     Contact.aggregate([{ $group: { _id: '$owner', n: { $sum: 1 } } }]),
@@ -373,6 +463,9 @@ router.get('/reps', async (req, res) => {
   const reachedBy = new Map()
   for (const r of reachedOwned) reachedBy.set(String(r._id), (reachedBy.get(String(r._id)) || 0) + r.n)
 
+  // Tasks worked in the period (done, skipped, snoozed, claimed / put back).
+  const worked = new Map((await tasksWorked(req, from, to)).totals.map((t) => [t.user, t]))
+
   const map = (rows, key = '_id') => new Map(rows.map((r) => [String(r[key]), r.n]))
   const overdueBy = map(overdue)
   const completedBy = map(completed)
@@ -400,6 +493,12 @@ router.get('/reps', async (req, res) => {
       contactsOwned: ownedBy.get(key) || 0,
       ownedReached: reachedBy.get(key) || 0,
       scraped: scrapedBy.get(key)?.n || 0,
+      tasksWorked: worked.get(key)?.worked || 0,
+      tasksDone: worked.get(key)?.done || 0,
+      tasksSkipped: worked.get(key)?.skipped || 0,
+      tasksSnoozed: worked.get(key)?.snoozed || 0,
+      tasksClaimed: worked.get(key)?.claimed || 0,
+      activeDays: worked.get(key)?.activeDays || 0,
       scrapedFound: scrapedBy.get(key)?.found || 0,
       dealsWon: wonBy.get(key) || 0,
       dealsLost: lostBy.get(key) || 0,

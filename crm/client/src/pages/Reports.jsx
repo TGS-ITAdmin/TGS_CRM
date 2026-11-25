@@ -127,7 +127,8 @@ export default function Reports() {
           : tab === 'channels'
           ? api.reportChannels({ ...range, campaign: campaign || undefined })
           : tab === 'reps'
-          ? api.reportReps(range)
+          ? Promise.all([api.reportReps({ ...range, campaign: campaign || undefined }), api.reportTasksWorked({ ...range, campaign: campaign || undefined })])
+            .then(([reps, worked]) => ({ ...reps, worked }))
           : api.reportScoreboard({ ...range, campaign: campaign || undefined, unit: spanDays(days, custom) <= 14 ? 'day' : 'week' }),
       ])
       if (req !== latest.current) return // a newer tab/filter was picked meanwhile
@@ -479,6 +480,12 @@ function RepsReport({ data }) {
         <div className="table-wrap">
           <table className="data">
             <thead>
+              <tr className="th-group">
+                <th />
+                <th colSpan={7} className="center">Outreach</th>
+                <th colSpan={7} className="center">Tasks</th>
+                <th colSpan={2} className="center">Book</th>
+              </tr>
               <tr>
                 <th style={{ minWidth: 200 }}>Rep</th>
                 <th className="right" title="All touches: LinkedIn + email + calls">Touches</th>
@@ -487,10 +494,14 @@ function RepsReport({ data }) {
                 <th className="right" title="Different contacts reached">Contacts</th>
                 <th className="right">Meetings</th>
                 <th className="right" title="Meetings booked ÷ contacts touched">Conv.</th>
+                <th className="right th-start" title="Different tasks this person did anything to in this period (finished or not)">Worked</th>
+                <th className="right" title="Mark done, Log call & close, Save & close">Done</th>
+                <th className="right" title="Skip task or Skip step">Skipped</th>
+                <th className="right" title="Snoozed 1 day or 1 week">Snoozed</th>
+                <th className="right" title="Claimed from a shared queue, or put back in it">Claimed</th>
                 <th className="right" title="Lead scraping tasks finished · how many found details">Scraped</th>
-                <th className="right">Tasks done</th>
-                <th className="right">Overdue</th>
-                <th className="right" title="Contacts this person owns">Owns</th>
+                <th className="right" title="Open tasks past their due date right now (not filtered by date)">Overdue</th>
+                <th className="right th-start" title="Contacts this person owns (all campaigns, any date)">Owns</th>
                 <th className="right" title="Of the contacts this person owns, how many anyone on the team has reached so far (any date)">Owned reached</th>
               </tr>
             </thead>
@@ -510,15 +521,21 @@ function RepsReport({ data }) {
                     {num(r.meetingsBooked)}
                   </td>
                   <td className="right">{pct(r.conversionRate)}</td>
+                  <td className="right strong td-start" title={r.activeDays ? `${r.activeDays} active day${r.activeDays === 1 ? '' : 's'} · ${(r.tasksWorked / r.activeDays).toFixed(1)} a day` : undefined}>
+                    {num(r.tasksWorked || 0)}
+                  </td>
+                  <td className="right">{num(r.tasksDone || 0)}</td>
+                  <td className="right">{num(r.tasksSkipped || 0)}</td>
+                  <td className="right">{num(r.tasksSnoozed || 0)}</td>
+                  <td className="right">{num(r.tasksClaimed || 0)}</td>
                   <td className="right">
                     {num(r.scraped || 0)}
                     {r.scraped > 0 && <span className="faint"> · {num(r.scrapedFound || 0)} found</span>}
                   </td>
-                  <td className="right">{num(r.tasksCompleted)}</td>
                   <td className="right" style={{ color: r.tasksOverdue ? 'var(--danger)' : undefined, fontWeight: r.tasksOverdue ? 650 : 400 }}>
                     {num(r.tasksOverdue)}
                   </td>
-                  <td className="right faint">{num(r.contactsOwned)}</td>
+                  <td className="right faint td-start">{num(r.contactsOwned)}</td>
                   <td className="right">
                     {num(r.ownedReached || 0)}
                     <span className="faint"> · {pct(r.contactsOwned ? Math.round(((r.ownedReached || 0) / r.contactsOwned) * 100) : 0)}</span>
@@ -539,10 +556,14 @@ function RepsReport({ data }) {
                     <td className="right" title="Not added up: two people can touch the same contact" />
                     <td className="right">{num(sum((r) => r.meetingsBooked))}</td>
                     <td className="right" />
+                    <td className="right td-start">{num(sum((r) => r.tasksWorked))}</td>
+                    <td className="right">{num(sum((r) => r.tasksDone))}</td>
+                    <td className="right">{num(sum((r) => r.tasksSkipped))}</td>
+                    <td className="right">{num(sum((r) => r.tasksSnoozed))}</td>
+                    <td className="right">{num(sum((r) => r.tasksClaimed))}</td>
                     <td className="right">{num(sum((r) => r.scraped))}</td>
-                    <td className="right">{num(sum((r) => r.tasksCompleted))}</td>
                     <td className="right">{num(sum((r) => r.tasksOverdue))}</td>
-                    <td className="right">{num(sum((r) => r.contactsOwned))}</td>
+                    <td className="right td-start">{num(sum((r) => r.contactsOwned))}</td>
                     <td className="right">
                       {num(sum((r) => r.ownedReached))}
                       <span className="faint"> · {pct(sum((r) => r.contactsOwned) ? Math.round((sum((r) => r.ownedReached) / sum((r) => r.contactsOwned)) * 100) : 0)}</span>
@@ -571,6 +592,115 @@ function RepsReport({ data }) {
           />
         </div>
       </div>
+      <TasksWorked data={data.worked} />
+    </div>
+  )
+}
+
+/* Tasks each person worked on in the period picked in the date filter:
+ * anything they did to a task counts, even if it is not finished, and each
+ * kind of action has its own column. "By day" splits it day by day. */
+function TasksWorked({ data }) {
+  const [view, setView] = useState('day')
+  if (!data) return null
+  const rows = data.rows || []
+  const totals = data.totals || []
+  const sum = (list, k) => list.reduce((t, r) => t + r[k], 0)
+  const dayLabel = (d) => new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+  const heads = (
+    <>
+      <th className="right" title="Different tasks this person did anything to">Tasks worked</th>
+      <th className="right" title="Mark done, Log call & close, Save & close">Done</th>
+      <th className="right" title="Skip task or Skip step">Skipped</th>
+      <th className="right" title="Snoozed 1 day or 1 week">Snoozed</th>
+      <th className="right" title="Claimed from a shared queue, or put back in it">Claimed / put back</th>
+    </>
+  )
+  const cells = (r) => (
+    <>
+      <td className="right"><strong>{num(r.worked)}</strong></td>
+      <td className="right">{num(r.done)}</td>
+      <td className="right">{num(r.skipped)}</td>
+      <td className="right">{num(r.snoozed)}</td>
+      <td className="right">{num(r.claimed)}</td>
+    </>
+  )
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Tasks worked by day</h2>
+        <span className="small faint" style={{ flex: 1 }}>
+          {view === 'period' ? 'For the dates picked above · each task counted once per person' : 'Each task counted once per person per day'} · days in {data.timezone}
+        </span>
+        <div className="row" style={{ gap: 4 }}>
+          <button className={`btn btn-sm${view === 'day' ? ' btn-primary' : ''}`} onClick={() => setView('day')}>By day</button>
+          <button className={`btn btn-sm${view === 'period' ? ' btn-primary' : ''}`} onClick={() => setView('period')}>Days active</button>
+        </div>
+      </div>
+      {rows.length === 0 ? (
+        <div className="card-body small faint">No task was worked on in this period.</div>
+      ) : view === 'period' ? (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th style={{ minWidth: 180 }}>Rep</th>
+                {heads}
+                <th className="right" title="Days this person worked on at least one task">Days active</th>
+                <th className="right" title="Tasks worked ÷ days active">Avg per day</th>
+              </tr>
+            </thead>
+            <tbody>
+              {totals.map((r) => (
+                <tr key={r.user}>
+                  <td>{r.name}</td>
+                  {cells(r)}
+                  <td className="right">{num(r.activeDays)}</td>
+                  <td className="right">{r.activeDays ? (r.worked / r.activeDays).toFixed(1) : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+            {totals.length > 1 && (
+              <tfoot>
+                <tr>
+                  <td>Team total</td>
+                  <td className="right">{num(sum(totals, 'worked'))}</td>
+                  <td className="right">{num(sum(totals, 'done'))}</td>
+                  <td className="right">{num(sum(totals, 'skipped'))}</td>
+                  <td className="right">{num(sum(totals, 'snoozed'))}</td>
+                  <td className="right">{num(sum(totals, 'claimed'))}</td>
+                  <td className="right" />
+                  <td className="right" />
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+      ) : (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th style={{ width: 130 }}>Day</th>
+                <th style={{ minWidth: 180 }}>Rep</th>
+                {heads}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => {
+                const firstOfDay = i === 0 || rows[i - 1].day !== r.day
+                return (
+                  <tr key={`${r.day}|${r.user}`} style={firstOfDay && i > 0 ? { borderTop: '2px solid var(--border)' } : undefined}>
+                    <td className="nowrap">{firstOfDay ? <strong>{dayLabel(r.day)}</strong> : ''}</td>
+                    <td>{r.name}</td>
+                    {cells(r)}
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }

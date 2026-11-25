@@ -300,6 +300,10 @@ table.data th.checkcol, table.data td.checkcol { width: 34px; padding-right: 0; 
 /* Number columns: header lines up with its figures, digits line up row to row. */
 table.data th.right, table.data td.right { text-align: right; }
 table.data td.right { font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Grouped column headings (e.g. Outreach · Tasks · Book on the Reps table). */
+table.data tr.th-group th { text-align: center; border-bottom: none; padding-bottom: 0; color: var(--text-faint); }
+table.data tr.th-group th:not(:empty) { border-bottom: 2px solid var(--border); }
+table.data .th-start, table.data .td-start { border-left: 1px solid var(--border); }
 table.data tfoot td { font-weight: 650; background: var(--surface-2); border-bottom: none; border-top: 1px solid var(--border); }
 
 /* ---------------- Work queue ---------------- */
