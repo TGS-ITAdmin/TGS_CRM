@@ -523,11 +523,23 @@ router.get('/reps', async (req, res) => {
   ])
   const scrapedBy = new Map(scraped.map((x) => [String(x._id), x]))
 
-  // Same definition of overdue as the work queue: due before today began.
+  /* Same definition of overdue as My Day: open, due before today began, and
+     not in a paused campaign (paused work is hidden from My Day until the
+     campaign is switched back on). Paused ones are counted separately. */
   const dayStart = startOfDay(req.user.timezone || 'UTC')
-  const [overdue, completed, owned] = await Promise.all([
+  const pausedIds = await Campaign.find({ active: false }).distinct('_id')
+  const overdueBase = { status: 'pending', dueAt: { $lt: dayStart }, ...campFilter }
+  const NONE = { _id: null } // matches nothing
+  const pickedIsPaused = !!campFilter.campaign && pausedIds.some((id) => String(id) === String(campFilter.campaign))
+  const liveOnly = campFilter.campaign ? (pickedIsPaused ? NONE : {}) : (pausedIds.length ? { campaign: { $nin: pausedIds } } : {})
+  const pausedOnly = campFilter.campaign ? (pickedIsPaused ? {} : NONE) : (pausedIds.length ? { campaign: { $in: pausedIds } } : NONE)
+  const [overdue, overduePaused, completed, owned] = await Promise.all([
     Task.aggregate([
-      { $match: { status: 'pending', dueAt: { $lt: dayStart }, ...campFilter } },
+      { $match: { ...overdueBase, ...liveOnly } },
+      { $group: { _id: '$assignedTo', n: { $sum: 1 } } },
+    ]),
+    Task.aggregate([
+      { $match: { ...overdueBase, ...pausedOnly } },
       { $group: { _id: '$assignedTo', n: { $sum: 1 } } },
     ]),
     Task.aggregate([
@@ -591,6 +603,7 @@ router.get('/reps', async (req, res) => {
 
   const map = (rows, key = '_id') => new Map(rows.map((r) => [String(r[key]), r.n]))
   const overdueBy = map(overdue)
+  const overduePausedBy = map(overduePaused)
   const completedBy = map(completed)
   const ownedBy = map(owned)
 
@@ -612,6 +625,7 @@ router.get('/reps', async (req, res) => {
       contactsTouched: touched.size,
       tasksCompleted: completedBy.get(key) || 0,
       tasksOverdue: overdueBy.get(key) || 0,
+      tasksOverduePaused: overduePausedBy.get(key) || 0,
       meetingsBooked: booked,
       contactsOwned: ownedBy.get(key) || 0,
       ownedReached: reachedBy.get(key) || 0,

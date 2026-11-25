@@ -465,15 +465,17 @@ function RepsReport({ data }) {
   if (!data.rows.length) return <div className="card"><Empty icon="👥" title="No users to report on" /></div>
 
   const totalOverdue = data.rows.reduce((s, r) => s + r.tasksOverdue, 0)
+  const totalPaused = data.rows.reduce((s, r) => s + (r.tasksOverduePaused || 0), 0)
 
   return (
     <div className="col" style={{ gap: 14 }}>
-      {totalOverdue > 0 && (
+      {(totalOverdue > 0 || totalPaused > 0) && (
         <div className="banner banner-warn">
           <span>⚠</span>
           <div>
             <strong>{num(totalOverdue)} tasks are overdue</strong> across the team. Overdue counts are live,
-            not filtered by the date range.
+            not filtered by the date range, and match My Day: tasks in paused campaigns are left out
+            {totalPaused > 0 && <> ({num(totalPaused)} more are overdue in paused campaigns, shown as “+ paused”)</>}.
           </div>
         </div>
       )}
@@ -539,10 +541,19 @@ function RepsReport({ data }) {
                     {r.tasksOverdue ? (
                       <button className="link-button" title={`See ${r.user.name}'s overdue tasks`}
                         style={{ color: 'inherit', fontWeight: 'inherit', textDecoration: 'underline' }}
-                        onClick={() => setOverdueFor(r.user)}>
+                        onClick={() => setOverdueFor({ user: r.user, paused: false })}>
                         {num(r.tasksOverdue)}
                       </button>
                     ) : num(r.tasksOverdue)}
+                    {r.tasksOverduePaused > 0 && (
+                      <div>
+                        <button className="link-button small" style={{ color: 'var(--text-faint)', fontWeight: 400 }}
+                          title="Overdue in paused campaigns: hidden from My Day until the campaign is switched back on"
+                          onClick={() => setOverdueFor({ user: r.user, paused: true })}>
+                          +{num(r.tasksOverduePaused)} paused
+                        </button>
+                      </div>
+                    )}
                   </td>
                   <td className="right faint td-start">{num(r.contactsOwned)}</td>
                   <td className="right">
@@ -603,31 +614,42 @@ function RepsReport({ data }) {
           />
         </div>
       </div>
-      {overdueFor && <OverdueList user={overdueFor} campaign={data.campaign} onClose={() => setOverdueFor(null)} />}
+      {overdueFor && <OverdueList user={overdueFor.user} startPaused={overdueFor.paused} campaign={data.campaign} onClose={() => setOverdueFor(null)} />}
     </div>
   )
 }
 
 /* One person's overdue tasks, oldest first: who, what step, how late.
  * Each row links to the contact so it can be worked or reassigned. */
-function OverdueList({ user, campaign, onClose }) {
+function OverdueList({ user, campaign, startPaused = false, onClose }) {
   const { user: me } = useAuth()
+  const [paused, setPaused] = useState(startPaused)
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
   useEffect(() => {
-    api.overdueTasks({ user: user.id, campaign: campaign || undefined })
+    setData(null)
+    api.overdueTasks({ user: user.id, campaign: campaign || undefined, paused: paused ? '1' : undefined })
       .then(setData).catch((err) => setError(err.message))
-  }, [user.id, campaign])
+  }, [user.id, campaign, paused])
   const daysLate = (d) => Math.max(1, Math.floor((Date.now() - new Date(d).getTime()) / 86400000))
   return (
-    <Modal title={`${user.name}: overdue tasks${data ? ` (${num(data.total)})` : ''}`} onClose={onClose} width="wide"
-      footer={<button className="btn" onClick={onClose}>Close</button>}>
+    <Modal title={`${user.name}: overdue tasks${paused ? ' in paused campaigns' : ''}${data ? ` (${num(data.total)})` : ''}`} onClose={onClose} width="wide"
+      footer={
+        <>
+          {paused
+            ? <button className="btn" onClick={() => setPaused(false)}>Show active campaigns</button>
+            : data?.pausedTotal > 0 && <button className="btn" onClick={() => setPaused(true)}>Show {num(data.pausedTotal)} in paused campaigns</button>}
+          <div className="spacer" />
+          <button className="btn" onClick={onClose}>Close</button>
+        </>
+      }>
       {error ? <div className="banner banner-danger">{error}</div> : !data ? <Loading /> : data.items.length === 0 ? (
         <Empty icon="✓" title="Nothing overdue">These may have been done since the report loaded.</Empty>
       ) : (
         <>
           <p className="small faint" style={{ marginTop: 0 }}>
-            Oldest first{campaign ? ' · this campaign only' : ''} · open and due before today.
+            Oldest first{campaign ? ' · this campaign only' : ''} · open and due before today
+            {paused ? ' · campaign is paused, so these are hidden from My Day until it is switched back on' : ' · same as My Day'}.
             Click a name to open the contact.
           </p>
           <div className="table-wrap" style={{ maxHeight: '60vh', overflowY: 'auto' }}>

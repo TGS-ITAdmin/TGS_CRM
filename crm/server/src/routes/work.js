@@ -271,17 +271,25 @@ router.get('/overdue', async (req, res) => {
   if (user !== String(req.user._id) && !req.can('reports.viewTeam')) {
     return res.status(403).json({ error: 'You can only see your own overdue tasks' })
   }
-  const filter = { assignedTo: user, status: 'pending', dueAt: { $lt: startOfDay(req.user.timezone || 'UTC') } }
-  if (/^[0-9a-f]{24}$/i.test(String(req.query.campaign || ''))) filter.campaign = req.query.campaign
+  const base = { assignedTo: user, status: 'pending', dueAt: { $lt: startOfDay(req.user.timezone || 'UTC') } }
+  if (/^[0-9a-f]{24}$/i.test(String(req.query.campaign || ''))) base.campaign = req.query.campaign
+  // Like My Day, paused campaigns are left out unless asked for (?paused=1).
+  const paused = await Campaign.find({ active: false }).distinct('_id')
+  const NONE = { _id: null } // matches nothing
+  const pickedIsPaused = !!base.campaign && paused.some((id) => String(id) === String(base.campaign))
+  const live = base.campaign ? (pickedIsPaused ? NONE : {}) : (paused.length ? { campaign: { $nin: paused } } : {})
+  const inPaused = base.campaign ? (pickedIsPaused ? {} : NONE) : (paused.length ? { campaign: { $in: paused } } : NONE)
+  const filter = req.query.paused === '1' ? { ...base, ...inPaused } : { ...base, ...live }
   const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 200))
-  const [items, total] = await Promise.all([
+  const [items, total, pausedTotal] = await Promise.all([
     Task.find(filter).sort({ dueAt: 1 }).limit(limit).populate(CONTACT_POPULATE).populate('campaign', 'name active').lean(),
     Task.countDocuments(filter),
+    Task.countDocuments({ ...base, ...inPaused }),
   ])
   const R = await rules.getRules()
   const cutoff = rules.escalationCutoff(new Date(), R)
   for (const t of items) t.escalated = new Date(t.dueAt) < cutoff
-  res.json({ items, total })
+  res.json({ items, total, pausedTotal })
 })
 
 /* ---- Call list: timezone-aware, sorted by who is reachable now ---- */
