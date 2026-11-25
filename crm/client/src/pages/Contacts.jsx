@@ -6,7 +6,7 @@ import { useToast } from '../components/Toast.jsx'
 import ContactForm from '../components/ContactForm.jsx'
 import LostReasonDialog from '../components/LostReasonDialog.jsx'
 import CampaignSelect, { CampaignChoiceHint } from '../components/CampaignSelect.jsx'
-import CompanyPicker from '../components/CompanyPicker.jsx'
+import { PickOne, SetCompanyDialog, TagDialog } from '../components/ContactBulkDialogs.jsx'
 import SavedViews from '../components/SavedViews.jsx'
 import { Channel, Confirm, Empty, Loading, Modal, Pager, StatusPill } from '../components/ui.jsx'
 import { fullName, relativeDate, num } from '../components/format.js'
@@ -452,79 +452,6 @@ function CampaignPicker({ title, campaigns, note, confirmLabel, danger, onConfir
           <CampaignChoiceHint campaign={chosen} />
         </>
       )}
-    </Modal>
-  )
-}
-
-function PickOne({ title, options, onConfirm, onClose }) {
-  const [value, setValue] = useState('')
-  return (
-    <Modal
-      title={title} onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" disabled={!value} onClick={() => onConfirm(value)}>Apply</button>
-        </>
-      }
-    >
-      <select className="select" value={value} onChange={(e) => setValue(e.target.value)}>
-        <option value="">Choose…</option>
-        {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-      </select>
-    </Modal>
-  )
-}
-
-function SetCompanyDialog({ count, onConfirm, onClose }) {
-  const [picked, setPicked] = useState({ company: '', companyName: '' })
-  return (
-    <Modal
-      title={`Set the company for ${count} contact${count === 1 ? '' : 's'}`} onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" disabled={!picked.company} onClick={() => onConfirm(picked.company)}>
-            Set company
-          </button>
-        </>
-      }
-    >
-      <div className="field">
-        <label className="label">Company</label>
-        <CompanyPicker value={picked.company} name={picked.companyName} onChange={setPicked} autoFocus />
-      </div>
-      <div className="hint">
-        Pick an existing company from the list — a bulk move needs an exact match, so free text is not
-        enough here.
-      </div>
-    </Modal>
-  )
-}
-
-function TagDialog({ onConfirm, onClose }) {
-  const [tag, setTag] = useState('')
-  const [remove, setRemove] = useState(false)
-  return (
-    <Modal
-      title="Tag contacts" onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" disabled={!tag.trim()} onClick={() => onConfirm(tag.trim(), remove)}>
-            {remove ? 'Remove tag' : 'Add tag'}
-          </button>
-        </>
-      }
-    >
-      <div className="field">
-        <label className="label">Tag</label>
-        <input className="input" value={tag} onChange={(e) => setTag(e.target.value)} autoFocus />
-      </div>
-      <label className="row small">
-        <input type="checkbox" className="checkbox" checked={remove} onChange={(e) => setRemove(e.target.checked)} />
-        Remove this tag instead of adding it
-      </label>
     </Modal>
   )
 }

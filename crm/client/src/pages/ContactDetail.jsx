@@ -8,6 +8,7 @@ import ContactForm from '../components/ContactForm.jsx'
 import WorkItem from '../components/WorkItem.jsx'
 import LostReasonDialog from '../components/LostReasonDialog.jsx'
 import CampaignSelect, { CampaignChoiceHint } from '../components/CampaignSelect.jsx'
+import { PickOne, SetCompanyDialog, TagDialog } from '../components/ContactBulkDialogs.jsx'
 import { ConfirmNext, NextStepBox, OutcomeFields, useOutcomePreview } from '../components/OutcomeBits.jsx'
 import { Channel, Confirm, CopyButton, Empty, Loading, Modal, StatusPill } from '../components/ui.jsx'
 import { dateTime, fullName, relativeDate } from '../components/format.js'
@@ -31,7 +32,7 @@ function Row({ label, children }) {
 export default function ContactDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
-  const { statusMap, statuses, isAdmin, can, statusRoles, emailStatuses, dncStatuses, outcomeCatalogue } = useAuth()
+  const { statusMap, statuses, isAdmin, can, statusRoles, emailStatuses, dncStatuses, outcomeCatalogue, users } = useAuth()
   const toast = useToast()
 
   const [data, setData] = useState(null)
@@ -125,6 +126,18 @@ export default function ContactDetail() {
     }
   }
 
+  // One of the list's bulk actions, applied to just this contact.
+  async function one(action, value, message) {
+    try {
+      await api.bulkContacts({ ids: [contact._id], action, value })
+      toast.success(message)
+      setDialog(null)
+      load()
+    } catch (err) {
+      toast.error(err.message)
+    }
+  }
+
   async function act(fn, message) {
     try {
       await fn()
@@ -159,12 +172,34 @@ export default function ContactDetail() {
           {statuses.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
         </select>
         <button className="btn btn-sm" onClick={() => setDialog('edit')}>Edit</button>
-        {can('campaigns.enroll') && (
-          <button className="btn btn-primary btn-sm" onClick={() => setDialog('enroll')}>Add to campaign</button>
-        )}
       </div>
 
       <div className="page">
+        {/* The same actions as the Contacts list, for this one contact. */}
+        {(can('campaigns.enroll') || can('contacts.edit')) && (
+          <div className="card contact-actions" style={{ marginBottom: 14 }}>
+            <div className="row wrap" style={{ gap: 6, padding: '10px 14px' }}>
+              {can('campaigns.enroll') && (
+                <>
+                  <button className="btn btn-sm btn-primary" onClick={() => setDialog('enroll')}>Add to campaign</button>
+                  <button className="btn btn-sm" disabled={!enrollments.some((e) => ['active', 'paused'].includes(e.status))}
+                    title={enrollments.some((e) => ['active', 'paused'].includes(e.status)) ? 'Move to another campaign' : 'Not in a campaign right now'}
+                    onClick={() => setDialog('move')}>Move campaign</button>
+                </>
+              )}
+              {can('contacts.edit') && (
+                <>
+                  <button className="btn btn-sm" onClick={() => setDialog('one-status')}>Set status</button>
+                  <button className="btn btn-sm" onClick={() => setDialog('one-email')}>Email status</button>
+                  <button className="btn btn-sm" onClick={() => setDialog('one-dnc')}>DNC status</button>
+                  {can('contacts.viewAll') && <button className="btn btn-sm" onClick={() => setDialog('one-owner')}>Reassign</button>}
+                  <button className="btn btn-sm" onClick={() => setDialog('one-tag')}>Tag</button>
+                  <button className="btn btn-sm" onClick={() => setDialog('one-company')}>Set company</button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
         {contact.company?.locked && (
           <div className="banner banner-warn">
             <span>🔒</span>
@@ -622,6 +657,41 @@ export default function ContactDetail() {
           onClose={() => setDialog(null)}
           onDone={(msg) => { toast.success(msg); setDialog(null); load() }}
         />
+      )}
+
+      {dialog === 'one-status' && (
+        <PickOne
+          title="Set status" initial={contact.status} options={statuses.map((s) => ({ value: s.value, label: s.label }))}
+          onClose={() => setDialog(null)}
+          onConfirm={(v) => {
+            setDialog(null)
+            // Lost needs a reason first (G17).
+            if (v === statusRoles.lost) setPendingLost(v)
+            else act(() => api.updateContact(contact._id, { status: v }), 'Status updated')
+          }}
+        />
+      )}
+      {dialog === 'one-email' && (
+        <PickOne title="Set email status" initial={contact.emailStatus} options={emailStatuses}
+          onClose={() => setDialog(null)} onConfirm={(v) => one('emailStatus', v, 'Email status updated')} />
+      )}
+      {dialog === 'one-dnc' && (
+        <PickOne title="Set DNC status" initial={contact.dncStatus} options={dncStatuses}
+          onClose={() => setDialog(null)} onConfirm={(v) => one('dncStatus', v, 'DNC status updated')} />
+      )}
+      {dialog === 'one-owner' && (
+        <PickOne title="Reassign owner" initial={contact.owner?._id || contact.owner || ''}
+          options={users.map((u) => ({ value: u.id, label: u.name }))}
+          hint="Their open tasks and email drafts move to the new owner. Shared-queue work and steps given to a named person stay where they are."
+          onClose={() => setDialog(null)} onConfirm={(v) => one('owner', v, 'Reassigned')} />
+      )}
+      {dialog === 'one-tag' && (
+        <TagDialog existing={contact.tags || []} onClose={() => setDialog(null)}
+          onConfirm={(tag, remove) => one(remove ? 'removeTag' : 'addTag', tag, remove ? 'Tag removed' : 'Tag added')} />
+      )}
+      {dialog === 'one-company' && (
+        <SetCompanyDialog count={1} onClose={() => setDialog(null)}
+          onConfirm={(companyId) => one('company', companyId, 'Company set')} />
       )}
 
       {pendingLost && (

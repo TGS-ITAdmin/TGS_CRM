@@ -520,7 +520,8 @@ router.post('/bulk', async (req, res) => {
   if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'No contacts selected' })
   if (ids.length > 5000) return res.status(400).json({ error: 'Select at most 5,000 contacts at a time' })
 
-  const scope = { _id: { $in: ids }, ...ownerScope(req) }
+  // Same reach as editing one contact: your own, or one you hold open work for.
+  const scope = { _id: { $in: ids }, ...(await contactAccessScope(req)) }
   const contacts = await Contact.find(scope).select('_id company owner').lean()
   const contactIds = contacts.map((l) => l._id)
   if (!contactIds.length) return res.status(404).json({ error: 'No matching contacts' })
